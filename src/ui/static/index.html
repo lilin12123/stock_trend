@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Intraday Alerts</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Intraday Volatility Alerts</h1>
+    <span id="status">loading...</span>
+    <span id="warmup" class="meta"></span>
+  </header>
+  <main>
+    <details open style="margin-bottom: 18px;">
+      <summary class="meta" style="cursor:pointer; margin-bottom: 8px;">当日K线（可拖拽/缩放）</summary>
+      <div class="filters" style="align-items: center;">
+        <strong>当日K线</strong>
+        <select id="chartSymbol"></select>
+        <select id="chartTf"></select>
+        <label class="meta" style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="toggleVwap" checked />
+          VWAP
+        </label>
+        <label class="meta" style="display:flex; align-items:center; gap:6px;">
+          <input type="checkbox" id="toggleCurve" />
+          曲线
+        </label>
+        <span class="meta" id="chartStatus"></span>
+      </div>
+      <div style="background: var(--panel); border: 1px solid #1f2937; border-radius: 12px; padding: 10px; position: relative;">
+        <canvas id="chart" height="320" style="width: 100%; display:block;"></canvas>
+        <div id="tooltip" class="meta" style="position:absolute; display:none; background:#0f1217; border:1px solid #1f2937; padding:6px 8px; border-radius:8px; max-width:280px;"></div>
+      </div>
+    </details>
+
+    <details open>
+      <summary class="meta" style="cursor:pointer; margin-bottom: 8px;">信号列表</summary>
+      <div class="filters">
+        <div class="multi-select" id="symbolSelect">
+          <button id="symbolToggle" type="button">选择股票</button>
+          <div class="multi-menu" id="symbolMenu"></div>
+        </div>
+        <div class="multi-select" id="levelSelect">
+          <button id="levelToggle" type="button">全部等级</button>
+          <div class="multi-menu level-menu" id="levelMenu">
+            <label class="meta" for="filterLevel1m">1m Lv</label>
+            <select id="filterLevel1m">
+              <option value="">全部</option>
+              <option value="Lv5">Lv5</option>
+              <option value="Lv4">Lv4+</option>
+              <option value="Lv3">Lv3+</option>
+              <option value="Lv2">Lv2+</option>
+              <option value="Lv1">Lv1+</option>
+              <option value="Lv0">Lv0+</option>
+            </select>
+            <label class="meta" for="filterLevel5m">5m Lv</label>
+            <select id="filterLevel5m">
+              <option value="">全部</option>
+              <option value="Lv5">Lv5</option>
+              <option value="Lv4">Lv4+</option>
+              <option value="Lv3">Lv3+</option>
+              <option value="Lv2">Lv2+</option>
+              <option value="Lv1">Lv1+</option>
+              <option value="Lv0">Lv0+</option>
+            </select>
+          </div>
+        </div>
+        <select id="filterTf"></select>
+        <input id="filterText" placeholder="关键词过滤" />
+        <button id="refreshBtn" type="button">刷新</button>
+      </div>
+      <div class="grid" id="list"></div>
+    </details>
+  </main>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

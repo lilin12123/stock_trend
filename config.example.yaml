@@ -1,0 +1,91 @@
+app:
+  tz: "Asia/Hong_Kong"         # 时区
+  open_d:
+    host: "127.0.0.1"          # OpenD 地址
+    port: 11111                # OpenD 端口
+  timeframes: ["1m", "5m"]     # 订阅周期
+  symbols:                     # 监控股票池
+    - "HK.00981"  # 中芯国际
+    - "HK.01810"  # 小米集团
+    - "HK.09988"  # 阿里巴巴-W
+    - "HK.00700"  # 腾讯控股
+  symbol_names:                # 股票中文名称（用于面板显示）
+    "HK.00981": "中芯国际"
+    "HK.01810": "小米集团"
+    "HK.09988": "阿里巴巴-W"
+    "HK.00700": "腾讯控股"
+  notify:
+    mode: "telegram"           # telegram | local | both
+    telegram:
+      token: "${TELEGRAM_BOT_TOKEN}"
+      chat_id: "${TELEGRAM_CHAT_ID}"
+  web:
+    enabled: true              # 本地Web面板
+    host: "127.0.0.1"
+    port: 8088
+    max_signals: 200
+  storage:
+    dir: "data/signals"        # 信号持久化目录
+    load_days: 7               # 面板加载最近N天
+  warmup:
+    enabled: true              # 启动时回放当日K线填充指标
+
+rules:
+  cooldown_seconds: 60         # 同一规则冷却时间（秒）
+
+  open_range_breakout:
+    enabled: true
+    range_minutes: 15          # 开盘区间长度
+    volume_mult: 1.5           # 量能阈值
+    tf_overrides:
+      "1m":
+        volume_mult: 1.2       # 1m放宽
+
+  vwap_deviation:
+    enabled: true
+    atr_period: 14             # ATR周期
+    dev_atr_mult: 1.5          # 偏离倍数
+    volume_mult: 2.0           # 量能阈值
+    vol_avg_period: 20         # 量能均值周期
+    tf_overrides:
+      "1m":
+        dev_atr_mult: 1.2
+        volume_mult: 1.5
+        vol_avg_period: 12
+
+  squeeze_breakout:
+    enabled: true
+    atr_period: 14             # ATR周期
+    lookback: 60               # 低波动观察窗口
+    low_quantile: 0.2          # 低波动分位
+    volume_mult: 1.5           # 量能阈值
+    tf_overrides:
+      "1m":
+        lookback: 40
+        volume_mult: 1.2
+
+  rsi_extreme:
+    enabled: true
+    period: 14                 # RSI周期
+    overbought: 70             # 超买阈值
+    oversold: 30               # 超卖阈值
+
+  break_retest:
+    enabled: true
+    retest_max_bars: 20        # 回踩确认最大等待K线数
+    retest_tolerance_pct: 0.1  # 回踩容忍百分比
+
+  volume_price_divergence:
+    enabled: true
+    lookback: 20               # 近期窗口
+    volume_mult: 0.8           # 量能低于均量的倍数
+
+  prev_day_break:
+    enabled: true
+    volume_mult: 1.5           # 量能阈值
+
+backtest:
+  tf_1m_horizon_minutes: 15    # 1分钟线：观察窗口（分钟）
+  tf_1m_min_move_pct: 0.5      # 1分钟线：最小涨跌幅（%）
+  tf_5m_horizon_minutes: 60    # 5分钟线：观察窗口（分钟）
+  tf_5m_min_move_pct: 1.5      # 5分钟线：最小涨跌幅（%）
