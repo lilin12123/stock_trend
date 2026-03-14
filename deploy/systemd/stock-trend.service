@@ -1,0 +1,20 @@
+[Unit]
+Description=Stock Trend Radar application
+After=network-online.target opend.service
+Wants=network-online.target
+Requires=opend.service
+
+[Service]
+Type=simple
+User=stocktrend
+Group=stocktrend
+WorkingDirectory=/opt/stock_trend/repo
+Environment=PYTHONUNBUFFERED=1
+EnvironmentFile=/etc/stock-trend/stock-trend.env
+ExecStart=/opt/stock_trend/repo/.venv/bin/python -m src.main --config /etc/stock-trend/config.yaml
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

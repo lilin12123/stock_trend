@@ -6,6 +6,7 @@
 
 - 快速查看产品使用方式，请阅读 [项目功能使用说明书.md](/Users/lilin/develop/workspace/codex/trending_and_chances/项目功能使用说明书.md)
 - Web 控制台右上角也提供了“使用说明”入口，可直接打开同一份文档
+- EC2 部署模板、`systemd`、`nginx` 与生产配置样例见 [deploy/README.md](/Users/lilin/develop/workspace/codex/trending_and_chances/deploy/README.md)
 
 ## 功能要点
 

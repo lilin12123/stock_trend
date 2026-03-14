@@ -1,0 +1,18 @@
+[Unit]
+Description=Futu OpenD
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stocktrend
+Group=stocktrend
+WorkingDirectory=/opt/stock_trend
+EnvironmentFile=/etc/stock-trend/opend.env
+ExecStart=/bin/bash -lc 'exec ${OPEND_COMMAND:?set OPEND_COMMAND in /etc/stock-trend/opend.env}'
+Restart=always
+RestartSec=5
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target
