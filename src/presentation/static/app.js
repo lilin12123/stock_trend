@@ -684,6 +684,7 @@ function renderRuntime() {
 }
 
 function renderStocks() {
+  const displayLabel = item => item?.symbol_name ? `${item.symbol} ${item.symbol_name}` : item.symbol;
   const toHtml = (items, emptyKey) => items.length
     ? items.map(item => `
       <div class="list-item">
@@ -693,7 +694,13 @@ function renderStocks() {
     : `<div class="meta-line">${t(emptyKey)}</div>`;
   document.getElementById('globalStockList').innerHTML = toHtml(state.globalStocks, 'config.noGlobalStocks');
   document.getElementById('myStockList').innerHTML = toHtml(state.myStocks, 'config.noMyStocks');
-  const symbols = [...new Set([...state.globalStocks, ...state.myStocks].map(item => item.symbol))];
+  const stockOptions = [];
+  [...state.globalStocks, ...state.myStocks].forEach(item => {
+    if (!stockOptions.some(entry => entry.symbol === item.symbol)) {
+      stockOptions.push(item);
+    }
+  });
+  const symbols = stockOptions.map(item => item.symbol);
   const signalSymbolFilter = document.getElementById('signalSymbolFilter');
   const previousSignalSymbol = signalSymbolFilter.value;
   signalSymbolFilter.innerHTML = `
@@ -718,8 +725,8 @@ function renderStocks() {
 
   const backtestSelect = document.getElementById('backtestSymbol');
   const previousBacktest = backtestSelect.value;
-  backtestSelect.innerHTML = symbols.length
-    ? symbols.map(symbol => `<option value="${symbol}">${symbol}</option>`).join('')
+  backtestSelect.innerHTML = stockOptions.length
+    ? stockOptions.map(item => `<option value="${item.symbol}">${displayLabel(item)}</option>`).join('')
     : `<option value="">${t('labs.backtestSymbolPlaceholder')}</option>`;
   if (symbols.includes(previousBacktest)) backtestSelect.value = previousBacktest;
   else if (symbols[0]) backtestSelect.value = symbols[0];

@@ -57,6 +57,14 @@ body {
   min-width: 0;
 }
 
+.brand-version {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+
 .lang-switch {
   display: inline-flex;
   align-self: flex-start;
