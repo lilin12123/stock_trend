@@ -50,3 +50,5 @@ data/
 .pytest_cache/
 .coverage
 htmlcov/
+
+OPERATIONS.md

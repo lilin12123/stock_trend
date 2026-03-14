@@ -20,6 +20,7 @@ Target shape:
 - `nginx/trend.freechatee.com.ssl.conf`: final HTTPS config if you prefer manual SSL wiring
 - `scripts/bootstrap_ubuntu.sh`: installs packages and prepares directories
 - `scripts/install_app.sh`: clones the repo and builds the Python venv
+- `OPERATIONS.md`: post-deploy update, restart, and troubleshooting guide
 
 ## Recommended order
 
