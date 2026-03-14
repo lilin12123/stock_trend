@@ -27,13 +27,13 @@ run.log
 logs/
 
 # 数据文件
-#data/
+data/
 *.csv
 *.json
 *.pkl
 *.parquet
 *.db
-#*.sqlite
+*.sqlite
 
 # IDE
 .idea/
