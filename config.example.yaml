@@ -1,5 +1,12 @@
 app:
   tz: "Asia/Hong_Kong"         # 时区
+  auth:
+    bootstrap_admin:
+      username: "admin"
+      password: "admin"
+    public_registration:
+      enabled: true
+      max_users: 200
   open_d:
     host: "127.0.0.1"          # OpenD 地址
     port: 11111                # OpenD 端口
@@ -9,11 +16,17 @@ app:
     - "HK.01810"  # 小米集团
     - "HK.09988"  # 阿里巴巴-W
     - "HK.00700"  # 腾讯控股
+    - "US.NVDA"   # NVIDIA
+    - "US.AMZN"   # Amazon
+    - "US.TSLA"   # Tesla
   symbol_names:                # 股票中文名称（用于面板显示）
     "HK.00981": "中芯国际"
     "HK.01810": "小米集团"
     "HK.09988": "阿里巴巴-W"
     "HK.00700": "腾讯控股"
+    "US.NVDA": "NVIDIA"
+    "US.AMZN": "Amazon"
+    "US.TSLA": "Tesla"
   notify:
     mode: "telegram"           # telegram | local | both
     telegram:
@@ -27,6 +40,7 @@ app:
   storage:
     dir: "data/signals"        # 信号持久化目录
     load_days: 7               # 面板加载最近N天
+    db_path: "data/app.sqlite" # SQLite 数据库
   warmup:
     enabled: true              # 启动时回放当日K线填充指标
 

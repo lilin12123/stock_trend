@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, time, timedelta
+from datetime import datetime, timedelta
 from typing import Optional
 
+from ...application.market_profile import market_in_primary_session, market_primary_session_open
 from ...models import Bar, Trigger
 
 
@@ -21,14 +22,6 @@ def _session_key(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d")
 
 
-def _morning_session_open(ts: datetime) -> datetime:
-    return ts.replace(hour=9, minute=30, second=0, microsecond=0)
-
-
-def _is_morning_session(ts: datetime) -> bool:
-    return time(9, 30) <= ts.time() < time(12, 0)
-
-
 def open_range_breakout(
     bar: Bar,
     state: OpenRangeState,
@@ -38,14 +31,14 @@ def open_range_breakout(
     volume_mult: float,
 ) -> Optional[Trigger]:
     # 开盘区间突破：先统计开盘前 N 分钟的高低点，再等待后续放量突破。
-    if not _is_morning_session(bar.ts):
+    if not market_in_primary_session(bar.symbol, bar.ts):
         return None
 
     session_key = _session_key(bar.ts)
     if state.session_date != session_key:
         # 进入新交易日时，重置开盘区间状态。
         state.session_date = session_key
-        state.range_end = _morning_session_open(bar.ts) + timedelta(minutes=range_minutes)
+        state.range_end = market_primary_session_open(bar.symbol, bar.ts) + timedelta(minutes=range_minutes)
         state.high = None
         state.low = None
         state.ready = False

@@ -1,0 +1,340 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>日内趋势雷达</title>
+  <link rel="icon" type="image/svg+xml" href="/brand-icon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand-row">
+        <div class="brand">
+          <img class="brand-mark" src="/brand-icon.svg" alt="日内趋势雷达图标" />
+          <div class="brand-copy">
+            <h1 data-i18n="brand.title">日内趋势雷达</h1>
+          </div>
+        </div>
+        <div class="lang-switch" aria-label="language switcher">
+          <button id="langZhBtn" class="lang-btn active" type="button">中文</button>
+          <button id="langEnBtn" class="lang-btn" type="button">English</button>
+        </div>
+      </div>
+      <div id="sessionCard" class="session-card hidden">
+        <div class="session-line">
+          <span id="sessionUser">-</span>
+          <span id="sessionRole" class="pill">-</span>
+        </div>
+        <button id="logoutBtn" class="ghost-btn" type="button" data-i18n="session.logout">退出登录</button>
+      </div>
+      <nav class="nav">
+        <button class="nav-btn active" data-view="monitor" type="button" data-i18n="nav.monitor">监控面板</button>
+        <button class="nav-btn" data-view="config" type="button" data-i18n="nav.config">配置中心</button>
+        <button id="adminNavBtn" class="nav-btn" data-view="admin" type="button" data-i18n="nav.admin">用户管理</button>
+        <button class="nav-btn" data-view="labs" type="button" data-i18n="nav.labs">策略实验室</button>
+      </nav>
+      <div class="sidebar-foot">
+        <button id="refreshAllBtn" class="accent-btn" type="button" data-i18n="actions.refresh">刷新</button>
+        <button id="applyConfigBtn" class="ghost-btn" type="button" data-i18n="actions.applyConfig">应用配置</button>
+      </div>
+    </aside>
+
+    <main class="content">
+      <section id="loginView" class="login-view">
+        <div class="login-grid">
+          <form id="loginForm" class="login-card">
+            <h2 data-i18n="login.title">登录日内趋势雷达</h2>
+            <p data-i18n="login.subtitle">默认管理员账号由初始化配置生成。</p>
+            <label>
+              <span data-i18n="login.username">用户名</span>
+              <input id="loginUsername" name="username" autocomplete="username" value="admin" />
+            </label>
+            <label>
+              <span data-i18n="login.password">密码</span>
+              <input id="loginPassword" name="password" type="password" autocomplete="current-password" value="admin" />
+            </label>
+            <button class="accent-btn" type="submit" data-i18n="login.submit">登录</button>
+            <div id="loginError" class="error-text"></div>
+          </form>
+          <form id="registerForm" class="login-card">
+            <h2 data-i18n="register.title">快速注册</h2>
+            <p id="registerMeta" class="meta-text">-</p>
+            <label>
+              <span data-i18n="register.username">用户名</span>
+              <input id="registerUsername" name="username" autocomplete="username" />
+            </label>
+            <label>
+              <span data-i18n="register.password">密码</span>
+              <input id="registerPassword" name="password" type="password" autocomplete="new-password" />
+            </label>
+            <div id="registerHint" class="meta-text" data-i18n="register.watchlistHint">每位用户当前最多只能维护 1 支自选股票。</div>
+            <button id="registerSubmitBtn" class="accent-btn" type="submit" data-i18n="register.submit">注册</button>
+            <div id="registerError" class="error-text"></div>
+            <div id="registerSuccess" class="success-text"></div>
+          </form>
+        </div>
+      </section>
+
+      <section id="appView" class="hidden">
+        <header class="page-head">
+          <div>
+            <h2 id="pageTitle">监控面板</h2>
+            <p id="pageSubtitle">实时查看信号、K 线与运行状态。</p>
+          </div>
+          <div class="page-actions">
+            <a id="manualLink" class="ghost-btn doc-link" href="/manual" target="_blank" rel="noopener noreferrer" data-i18n="actions.manual">使用说明</a>
+            <span id="runtimeBadge" class="pill">离线</span>
+            <span id="statusHint" class="meta-text">-</span>
+          </div>
+        </header>
+
+        <section id="view-monitor" class="view active">
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="monitor.mySignals">我的信号</h3>
+                <div class="toolbar">
+                  <input id="signalTextFilter" data-i18n-placeholder="monitor.signalFilter" placeholder="关键词过滤" />
+                  <select id="signalSymbolFilter">
+                    <option value="" data-i18n="monitor.allStocks">全部股票</option>
+                  </select>
+                  <select id="signalTfFilter">
+                    <option value="" data-i18n="monitor.allTimeframes">全部周期</option>
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                  </select>
+                </div>
+              </div>
+              <div id="signalList" class="signal-list"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="monitor.chartParams">图表参数</h3>
+              </div>
+              <div class="toolbar chart-toolbar">
+                <select id="chartSymbol"></select>
+                <select id="chartTf">
+                  <option value="1m">1m</option>
+                  <option value="5m">5m</option>
+                </select>
+                <select id="chartMode">
+                  <option value="candles" data-i18n="monitor.chartModeCandles">K线</option>
+                  <option value="line" data-i18n="monitor.chartModeLine">曲线</option>
+                </select>
+                <label class="check-row inline-check compact-check">
+                  <input id="chartShowVwap" type="checkbox" checked />
+                  <span data-i18n="monitor.showVwap">显示 VWAP</span>
+                </label>
+                <button id="resetChartViewBtn" class="mini-btn" type="button" data-i18n="monitor.resetChart">重置视图</button>
+                <button id="refreshChartBtn" class="mini-btn" type="button" data-i18n="monitor.refreshChart">更新图表</button>
+              </div>
+              <div id="chartMeta" class="meta-line chart-meta"></div>
+              <div class="chart-frame">
+                <canvas id="chartCanvas" height="380"></canvas>
+              </div>
+            </article>
+          </div>
+          <div class="panel-grid monitor-runtime-row top-grid">
+            <article class="panel wide">
+              <div class="panel-head">
+                <h3 data-i18n="monitor.runtime">运行状态</h3>
+                <button id="refreshRuntimeBtn" class="mini-btn" type="button" data-i18n="monitor.refreshRuntime">刷新状态</button>
+              </div>
+              <div id="runtimeStatus" class="stats-grid"></div>
+              <div id="runtimeEvents" class="event-list"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-config" class="view">
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.globalStocks">全局股票池</h3>
+              </div>
+              <form id="globalStockForm" class="stack-form">
+                <input name="symbol" placeholder="HK.00981" />
+                <input name="symbol_name" data-i18n-placeholder="config.stockNamePlaceholder" placeholder="中芯国际" />
+                <button class="accent-btn" type="submit" data-i18n="config.addGlobalStock">添加全局股票</button>
+              </form>
+              <div id="globalStockList" class="list-block"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.myStocks">我的自选池</h3>
+              </div>
+              <form id="myStockForm" class="stack-form">
+                <input name="symbol" placeholder="HK.00700" />
+                <input name="symbol_name" data-i18n-placeholder="config.stockNamePlaceholder" placeholder="腾讯控股" />
+                <button class="accent-btn" type="submit" data-i18n="config.addMyStock">添加自选股票</button>
+              </form>
+              <div class="meta-text" data-i18n="config.myStockLimit">每位用户当前最多只能维护 1 支自选股票。</div>
+              <div id="myStockError" class="error-text"></div>
+              <div id="myStockList" class="list-block"></div>
+            </article>
+          </div>
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.defaultRules">默认规则</h3>
+              </div>
+              <pre id="defaultRulesView" class="code-block"></pre>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.myRuleOverrides">我的规则覆盖</h3>
+              </div>
+              <textarea id="myRulesEditor" class="code-editor"></textarea>
+              <button id="saveRulesBtn" class="accent-btn" type="button" data-i18n="config.saveRules">保存规则覆盖</button>
+            </article>
+          </div>
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.notifications">通知配置</h3>
+              </div>
+              <form id="notificationForm" class="stack-form">
+                <select name="mode">
+                  <option value="none" data-i18n="config.notifyNone">关闭所有通知</option>
+                  <option value="local" data-i18n="config.notifyLocal">仅本地通知</option>
+                  <option value="telegram" data-notify-admin-only="1" data-i18n="config.notifyTelegram">仅 Telegram</option>
+                  <option value="both" data-notify-admin-only="1" data-i18n="config.notifyBoth">本地 + Telegram</option>
+                </select>
+                <div id="telegramSettingsFields" class="stack-form">
+                  <input name="telegram_token" placeholder="Telegram token" />
+                  <input name="telegram_chat_id" placeholder="Telegram chat id" />
+                </div>
+                <div id="telegramAdminOnlyHint" class="meta-line hidden" data-i18n="config.telegramAdminOnly">Telegram 仅管理员可配置</div>
+                <label class="check-row">
+                  <input name="bell_on_alert" type="checkbox" />
+                  <span data-i18n="config.bellOnAlert">提示时响铃</span>
+                </label>
+                <button class="accent-btn" type="submit" data-i18n="config.saveNotifications">保存通知设置</button>
+              </form>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-admin" class="view">
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="admin.createUser">创建用户</h3>
+              </div>
+              <form id="createUserForm" class="stack-form">
+                <input name="username" data-i18n-placeholder="admin.usernamePlaceholder" placeholder="用户名" />
+                <input name="password" data-i18n-placeholder="admin.passwordPlaceholder" placeholder="初始密码" />
+                <select name="role">
+                  <option value="user">user</option>
+                  <option value="admin">admin</option>
+                </select>
+                <button class="accent-btn" type="submit" data-i18n="admin.createUserAction">创建用户</button>
+              </form>
+              <div id="createUserError" class="error-text"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="admin.userList">用户列表</h3>
+              </div>
+              <div id="userList" class="list-block"></div>
+            </article>
+          </div>
+        </section>
+
+        <section id="view-labs" class="view">
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="labs.localBacktest">本地回测</h3>
+              </div>
+              <form id="backtestForm" class="stack-form">
+                <div class="backtest-form-grid">
+                  <select id="backtestSymbol" name="symbol"></select>
+                  <input id="backtestDate" name="date" type="date" />
+                </div>
+                <div class="backtest-timeframes">
+                  <span class="meta-text" data-i18n="labs.useTimeframes">回测周期</span>
+                  <label class="check-row inline-check">
+                    <input id="backtestTf1m" name="timeframes" type="checkbox" value="1m" checked />
+                    <span>1m</span>
+                  </label>
+                  <label class="check-row inline-check">
+                    <input id="backtestTf5m" name="timeframes" type="checkbox" value="5m" checked />
+                    <span>5m</span>
+                  </label>
+                </div>
+                <div class="panel-head compact-head">
+                  <h4 data-i18n="labs.passCriteria">测试通过条件</h4>
+                </div>
+                <div class="backtest-criteria-grid">
+                  <div class="criteria-card">
+                    <div class="criteria-title" data-i18n="labs.criteria1m">1m 条件</div>
+                    <label>
+                      <span data-i18n="labs.horizonMinutes">观察窗口(分钟)</span>
+                      <input id="criteria1mHorizon" name="criteria_1m_horizon" type="number" min="1" step="1" />
+                    </label>
+                    <label>
+                      <span data-i18n="labs.minMovePct">最小波动(%)</span>
+                      <input id="criteria1mMove" name="criteria_1m_move" type="number" min="0.01" step="0.01" />
+                    </label>
+                  </div>
+                  <div class="criteria-card">
+                    <div class="criteria-title" data-i18n="labs.criteria5m">5m 条件</div>
+                    <label>
+                      <span data-i18n="labs.horizonMinutes">观察窗口(分钟)</span>
+                      <input id="criteria5mHorizon" name="criteria_5m_horizon" type="number" min="1" step="1" />
+                    </label>
+                    <label>
+                      <span data-i18n="labs.minMovePct">最小波动(%)</span>
+                      <input id="criteria5mMove" name="criteria_5m_move" type="number" min="0.01" step="0.01" />
+                    </label>
+                  </div>
+                </div>
+                <button class="accent-btn" type="submit" data-i18n="labs.submitBacktest">提交回测</button>
+              </form>
+              <div id="backtestError" class="error-text"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="labs.backtestSummary">回测 Summary</h3>
+              </div>
+              <div id="backtestSummaryView" class="backtest-detail-view"></div>
+            </article>
+          </div>
+          <div class="panel-grid labs-wide-row">
+            <article class="panel wide labs-backtest-panel">
+              <div class="panel-head">
+                <h3 data-i18n="labs.backtestSignals">触发信号</h3>
+              </div>
+              <div id="backtestSignalsView" class="backtest-detail-view"></div>
+            </article>
+          </div>
+          <div class="panel-grid">
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="labs.ruleTemplates">策略模板</h3>
+              </div>
+              <form id="templateForm" class="stack-form">
+                <input name="name" data-i18n-placeholder="labs.templateName" placeholder="模板名" />
+                <input name="description" data-i18n-placeholder="labs.templateDescription" placeholder="描述" />
+                <textarea id="templateConfigEditor" class="code-editor short"></textarea>
+                <button class="accent-btn" type="submit" data-i18n="labs.saveTemplate">保存模板</button>
+              </form>
+              <div id="templateList" class="list-block"></div>
+            </article>
+            <article class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="labs.analytics">分析概览</h3>
+              </div>
+              <pre id="analyticsView" class="code-block"></pre>
+            </article>
+          </div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/app.js" defer></script>
+</body>
+</html>
