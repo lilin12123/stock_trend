@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -9,6 +9,7 @@ from zoneinfo import ZoneInfo
 
 from ..application.market_profile import (
     detect_market_code,
+    market_day_close,
     market_effective_trade_date,
     market_previous_trading_date,
     market_trading_session,
@@ -19,6 +20,25 @@ from ..application.rule_runtime import parse_time_key
 from ..application.subscriptions import ProfileRuntime, SubscriptionPlanner
 from ..domain import Bar, RuntimeStatus, Signal
 from ..infrastructure import NotificationDispatcher, OpenDGateway, SqliteStore
+
+
+@dataclass
+class PendingSignalEvaluation:
+    signal_id: str
+    symbol: str
+    timeframe: str
+    trade_date: str
+    signal_bar_ts: str
+    base_close: float
+    horizon_minutes: int
+    target_bars: int
+    deadline_ts: datetime
+    observed_bars: int = 0
+    last_observed_bar_ts: Optional[str] = None
+    max_up: float = 0.0
+    max_down: float = 0.0
+    final_change: float = 0.0
+    completed: bool = False
 
 
 class MonitoringService:
@@ -49,7 +69,11 @@ class MonitoringService:
         self._profiles_lock = threading.Lock()
         self._day_bars: Dict[str, List[Dict[str, Any]]] = {}
         self._vwap_state: Dict[str, Dict[str, Any]] = {}
+        self._market_snapshots: Dict[str, Dict[str, Any]] = {}
+        self._market_reference_days: Dict[str, str] = {}
+        self._pending_signal_evaluations: Dict[str, List[PendingSignalEvaluation]] = {}
         self._signal_cleanup_days: Dict[str, str] = {}
+        self._forward_metrics_config = self.store.get_forward_metrics_config(app_cfg)
         self._status = RuntimeStatus(started=False, active_timeframes=self._timeframes)
         self._status_lock = threading.Lock()
 
@@ -62,6 +86,7 @@ class MonitoringService:
 
     def apply_config(self, startup: bool = False) -> Dict[str, Any]:
         try:
+            self._forward_metrics_config = self.store.get_forward_metrics_config(self.app_cfg)
             profiles = self._load_profiles()
             symbols = self.planner.active_symbols(profiles)
             with self._profiles_lock:
@@ -132,6 +157,9 @@ class MonitoringService:
             items = [item for item in items if str(item.get("ts", "")) > since]
         return items
 
+    def get_market_snapshots(self) -> Dict[str, Dict[str, Any]]:
+        return {symbol: dict(snapshot) for symbol, snapshot in self._market_snapshots.items()}
+
     def on_bar(self, bar: Bar) -> None:
         if bar.ts.tzinfo is None:
             bar = Bar(
@@ -159,7 +187,9 @@ class MonitoringService:
             return
         self._purge_old_market_signals(bar)
         self._track_bar(bar)
+        self._update_pending_signal_evaluations(bar)
         self._process_bar(bar, emit=True)
+        self._finalize_pending_signal_evaluations_for_market_close(bar)
 
     def _load_profiles(self) -> List[ProfileRuntime]:
         users = [self.store.get_user_by_id(user.id) for user in self.store.list_users()]
@@ -186,6 +216,16 @@ class MonitoringService:
             yesterday = market_previous_trading_date(symbol, self._tz.key, reference_date=datetime.fromisoformat(today).date())
             prev_day = self.gateway.request_prev_day(symbol, yesterday)
             if prev_day:
+                self._market_reference_days[symbol] = today
+                self._market_snapshots[symbol] = {
+                    "symbol": symbol,
+                    "trade_date": today,
+                    "prev_close": float(prev_day.get("close") or 0.0),
+                    "last_price": None,
+                    "change_pct": None,
+                    "last_ts": None,
+                    "timeframe": None,
+                }
                 for profile in profiles:
                     if symbol in profile.symbols:
                         profile.engine.store.set_prev_day(symbol, float(prev_day["high"]), float(prev_day["low"]))
@@ -221,6 +261,10 @@ class MonitoringService:
                 continue
             for raw_signal in signals:
                 symbol_name = profile.symbol_names.get(raw_signal.symbol)
+                context_snapshot = {
+                    **(raw_signal.context or {}),
+                    "forward_metrics": self._initial_forward_metrics(raw_signal.timeframe),
+                }
                 signal = Signal(
                     symbol=raw_signal.symbol,
                     symbol_name=symbol_name,
@@ -235,10 +279,11 @@ class MonitoringService:
                     owner_user_id=profile.owner_user_id,
                     source_rule=raw_signal.rule,
                     dedupe_key=self._dedupe_key(profile, raw_signal),
-                    context_snapshot=raw_signal.context or {},
+                    context_snapshot=context_snapshot,
                     signal_id=uuid4().hex,
                 )
                 signal_id = self.store.save_signal(signal, raw_signal.triggers or [])
+                self._register_signal_evaluation(signal_id, signal, bar.close)
                 self.store.add_runtime_event(
                     "info",
                     "signal_created",
@@ -251,6 +296,7 @@ class MonitoringService:
                     self.dispatcher.dispatch(signal_id, profile.notification, text)
 
     def _track_bar(self, bar: Bar) -> None:
+        self._ensure_market_reference(bar.symbol, bar.ts.date().isoformat())
         key = f"{bar.symbol}:{bar.timeframe}"
         bars = self._day_bars.setdefault(key, [])
         ts = bar.ts.isoformat()
@@ -275,10 +321,142 @@ class MonitoringService:
             bars[-1] = payload
         else:
             bars.append(payload)
+        self._update_market_snapshot(bar)
 
     def _dedupe_key(self, profile: ProfileRuntime, signal: Signal) -> str:
         minute = signal.ts.strftime("%Y-%m-%dT%H:%M")
         return f"{profile.scope}:{profile.owner_user_id}:{signal.symbol}:{signal.timeframe}:{minute}:{signal.rule}:{signal.direction}"
+
+    def _initial_forward_metrics(self, timeframe: str) -> Dict[str, Any]:
+        horizon_minutes, target_bars = self._evaluation_window(timeframe)
+        return {
+            "horizon_minutes": horizon_minutes,
+            "target_bars": target_bars,
+            "observed_bars": 0,
+            "max_up": None,
+            "max_down": None,
+            "final_change": None,
+            "completed": False,
+        }
+
+    @staticmethod
+    def _bars_for_horizon(timeframe: str, horizon_minutes: int) -> int:
+        tf = str(timeframe or "").strip().lower()
+        tf_minutes = 1 if tf == "1m" else 5
+        return max(1, int(horizon_minutes / tf_minutes))
+
+    @staticmethod
+    def _timeframe_minutes(timeframe: str) -> int:
+        return 1 if str(timeframe or "").strip().lower() == "1m" else 5
+
+    def _evaluation_window(self, timeframe: str) -> tuple[int, int]:
+        tf = str(timeframe or "").strip().lower()
+        if tf == "1m":
+            horizon_minutes = int(self._forward_metrics_config.get("1m_horizon_minutes", 20))
+        else:
+            horizon_minutes = int(self._forward_metrics_config.get("5m_horizon_minutes", 60))
+        return horizon_minutes, self._bars_for_horizon(tf, horizon_minutes)
+
+    def _register_signal_evaluation(self, signal_id: str, signal: Signal, base_close: float) -> None:
+        horizon_minutes, target_bars = self._evaluation_window(signal.timeframe)
+        if base_close <= 0:
+            return
+        signal_ts = normalize_market_datetime(signal.symbol, signal.ts, self._tz.key)
+        deadline_ts = min(
+            signal_ts + timedelta(minutes=horizon_minutes),
+            market_day_close(signal.symbol, signal_ts, self._tz.key),
+        )
+        key = f"{signal.symbol}:{signal.timeframe}"
+        self._pending_signal_evaluations.setdefault(key, []).append(
+            PendingSignalEvaluation(
+                signal_id=signal_id,
+                symbol=signal.symbol,
+                timeframe=signal.timeframe,
+                trade_date=signal_ts.date().isoformat(),
+                signal_bar_ts=signal_ts.isoformat(),
+                base_close=float(base_close),
+                horizon_minutes=horizon_minutes,
+                target_bars=target_bars,
+                deadline_ts=deadline_ts,
+            )
+        )
+
+    def _update_pending_signal_evaluations(self, bar: Bar) -> None:
+        key = f"{bar.symbol}:{bar.timeframe}"
+        pending = self._pending_signal_evaluations.get(key)
+        if not pending:
+            return
+        remaining: List[PendingSignalEvaluation] = []
+        current_trade_date = bar.ts.date().isoformat()
+        bar_ts = bar.ts.isoformat()
+        for item in pending:
+            if item.completed or item.base_close <= 0:
+                continue
+            if item.trade_date != current_trade_date:
+                self._complete_signal_evaluation(item, item.deadline_ts)
+                continue
+            if bar_ts == item.signal_bar_ts:
+                remaining.append(item)
+                continue
+            if item.last_observed_bar_ts != bar_ts:
+                item.observed_bars += 1
+                item.last_observed_bar_ts = bar_ts
+            item.max_up = max(item.max_up, (bar.high - item.base_close) / item.base_close * 100.0)
+            item.max_down = max(item.max_down, (item.base_close - bar.low) / item.base_close * 100.0)
+            item.final_change = (bar.close - item.base_close) / item.base_close * 100.0
+            is_closing_bar = self._bar_interval_end(bar) >= market_day_close(bar.symbol, bar.ts, self._tz.key)
+            if item.observed_bars >= item.target_bars or bar.ts >= item.deadline_ts or is_closing_bar:
+                self._complete_signal_evaluation(item, bar.ts, completed_by_close=is_closing_bar and bar.ts < item.deadline_ts)
+            else:
+                remaining.append(item)
+        if remaining:
+            self._pending_signal_evaluations[key] = remaining
+        else:
+            self._pending_signal_evaluations.pop(key, None)
+
+    def _finalize_pending_signal_evaluations_for_market_close(self, bar: Bar) -> None:
+        if self._bar_interval_end(bar) < market_day_close(bar.symbol, bar.ts, self._tz.key):
+            return
+        key = f"{bar.symbol}:{bar.timeframe}"
+        pending = self._pending_signal_evaluations.get(key)
+        if not pending:
+            return
+        remaining: List[PendingSignalEvaluation] = []
+        for item in pending:
+            if item.completed or item.trade_date != bar.ts.date().isoformat():
+                remaining.append(item)
+                continue
+            self._complete_signal_evaluation(item, bar.ts, completed_by_close=True)
+        self._pending_signal_evaluations[key] = [item for item in remaining if not item.completed]
+        if not self._pending_signal_evaluations[key]:
+            self._pending_signal_evaluations.pop(key, None)
+
+    def _complete_signal_evaluation(
+        self,
+        item: PendingSignalEvaluation,
+        completed_at: datetime,
+        completed_by_close: bool = False,
+    ) -> None:
+        item.completed = True
+        signal_row = self.store.get_signal(item.signal_id)
+        if not signal_row:
+            return
+        context_snapshot = signal_row.get("context_snapshot") or {}
+        context_snapshot["forward_metrics"] = {
+            "horizon_minutes": item.horizon_minutes,
+            "target_bars": item.target_bars,
+            "observed_bars": item.observed_bars,
+            "max_up": item.max_up,
+            "max_down": item.max_down,
+            "final_change": item.final_change,
+            "completed": True,
+            "completed_at": completed_at.isoformat(),
+            "completed_by_close": completed_by_close,
+        }
+        self.store.update_signal_context_snapshot(item.signal_id, context_snapshot)
+
+    def _bar_interval_end(self, bar: Bar) -> datetime:
+        return bar.ts + timedelta(minutes=self._timeframe_minutes(bar.timeframe))
 
     def _purge_old_market_signals(self, bar: Bar) -> None:
         market = detect_market_code(bar.symbol)
@@ -294,6 +472,49 @@ class MonitoringService:
                 f"Purged {deleted} stale {market} signals before {trade_date}.",
                 {"market": market, "trade_date": trade_date, "deleted": deleted},
             )
+
+    def _ensure_market_reference(self, symbol: str, trade_date: str) -> None:
+        if self._market_reference_days.get(symbol) == trade_date:
+            return
+        yesterday = market_previous_trading_date(
+            symbol,
+            self._tz.key,
+            reference_date=datetime.fromisoformat(trade_date).date(),
+        )
+        prev_day = self.gateway.request_prev_day(symbol, yesterday)
+        prev_close = float(prev_day.get("close") or 0.0) if prev_day else 0.0
+        snapshot = self._market_snapshots.get(symbol, {})
+        snapshot.update(
+            {
+                "symbol": symbol,
+                "trade_date": trade_date,
+                "prev_close": prev_close if prev_close > 0 else snapshot.get("prev_close"),
+                "last_price": None,
+                "change_pct": None,
+                "last_ts": None,
+                "timeframe": None,
+            }
+        )
+        self._market_snapshots[symbol] = snapshot
+        self._market_reference_days[symbol] = trade_date
+
+    def _update_market_snapshot(self, bar: Bar) -> None:
+        trade_date = bar.ts.date().isoformat()
+        snapshot = self._market_snapshots.get(bar.symbol, {})
+        prev_close = snapshot.get("prev_close")
+        if not prev_close or float(prev_close) <= 0:
+            prev_close = None
+        snapshot.update(
+            {
+                "symbol": bar.symbol,
+                "trade_date": trade_date,
+                "last_price": float(bar.close),
+                "last_ts": bar.ts.isoformat(),
+                "timeframe": bar.timeframe,
+                "change_pct": ((float(bar.close) - float(prev_close)) / float(prev_close) * 100.0) if prev_close else None,
+            }
+        )
+        self._market_snapshots[bar.symbol] = snapshot
 
     def _set_status(self, **updates: Any) -> None:
         with self._status_lock:

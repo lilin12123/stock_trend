@@ -254,6 +254,11 @@ body {
   padding: 18px;
 }
 
+.panel-body {
+  display: grid;
+  gap: 10px;
+}
+
 .panel.wide {
   grid-column: span 1;
 }
@@ -269,6 +274,10 @@ body {
   align-items: center;
   gap: 12px;
   margin-bottom: 14px;
+}
+
+.panel-collapsed .panel-head {
+  margin-bottom: 0;
 }
 
 .toolbar,
@@ -446,6 +455,35 @@ textarea {
 .event-item .meta-line {
   color: var(--muted);
   font-size: 12px;
+}
+
+.signal-price-line,
+.signal-evaluation-line {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+}
+
+.signal-price-line strong {
+  color: var(--ink);
+  font-size: 13px;
+}
+
+.signal-metric-value {
+  font-weight: 700;
+}
+
+.signal-metric-value.up {
+  color: #b91c1c;
+}
+
+.signal-metric-value.down {
+  color: #0f766e;
+}
+
+.signal-metric-value.flat {
+  color: var(--muted);
 }
 
 .chart-meta {

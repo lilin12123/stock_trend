@@ -75,6 +75,12 @@ def market_primary_session_open(symbol: str | None, ts: datetime, default_tz: st
     return local_ts.replace(hour=start.hour, minute=start.minute, second=0, microsecond=0)
 
 
+def market_day_close(symbol: str | None, ts: datetime, default_tz: str = "Asia/Hong_Kong") -> datetime:
+    local_ts = normalize_market_datetime(symbol, ts, default_tz)
+    end = get_market_profile(symbol, default_tz).sessions[-1][1]
+    return local_ts.replace(hour=end.hour, minute=end.minute, second=0, microsecond=0)
+
+
 def market_in_primary_session(symbol: str | None, ts: datetime, default_tz: str = "Asia/Hong_Kong") -> bool:
     local_ts = normalize_market_datetime(symbol, ts, default_tz)
     start, end = get_market_profile(symbol, default_tz).sessions[0]

@@ -111,30 +111,33 @@
               </div>
               <div id="signalList" class="signal-list"></div>
             </article>
-            <article class="panel">
+            <article id="chartPanel" class="panel">
               <div class="panel-head">
                 <h3 data-i18n="monitor.chartParams">图表参数</h3>
+                <button id="toggleChartPanelBtn" class="mini-btn" type="button">收起</button>
               </div>
-              <div class="toolbar chart-toolbar">
-                <select id="chartSymbol"></select>
-                <select id="chartTf">
-                  <option value="1m">1m</option>
-                  <option value="5m">5m</option>
-                </select>
-                <select id="chartMode">
-                  <option value="candles" data-i18n="monitor.chartModeCandles">K线</option>
-                  <option value="line" data-i18n="monitor.chartModeLine">曲线</option>
-                </select>
-                <label class="check-row inline-check compact-check">
-                  <input id="chartShowVwap" type="checkbox" checked />
-                  <span data-i18n="monitor.showVwap">显示 VWAP</span>
-                </label>
-                <button id="resetChartViewBtn" class="mini-btn" type="button" data-i18n="monitor.resetChart">重置视图</button>
-                <button id="refreshChartBtn" class="mini-btn" type="button" data-i18n="monitor.refreshChart">更新图表</button>
-              </div>
-              <div id="chartMeta" class="meta-line chart-meta"></div>
-              <div class="chart-frame">
-                <canvas id="chartCanvas" height="380"></canvas>
+              <div id="chartPanelBody" class="panel-body">
+                <div class="toolbar chart-toolbar">
+                  <select id="chartSymbol"></select>
+                  <select id="chartTf">
+                    <option value="1m">1m</option>
+                    <option value="5m">5m</option>
+                  </select>
+                  <select id="chartMode">
+                    <option value="candles" data-i18n="monitor.chartModeCandles">K线</option>
+                    <option value="line" data-i18n="monitor.chartModeLine">曲线</option>
+                  </select>
+                  <label class="check-row inline-check compact-check">
+                    <input id="chartShowVwap" type="checkbox" checked />
+                    <span data-i18n="monitor.showVwap">显示 VWAP</span>
+                  </label>
+                  <button id="resetChartViewBtn" class="mini-btn" type="button" data-i18n="monitor.resetChart">重置视图</button>
+                  <button id="refreshChartBtn" class="mini-btn" type="button" data-i18n="monitor.refreshChart">更新图表</button>
+                </div>
+                <div id="chartMeta" class="meta-line chart-meta"></div>
+                <div class="chart-frame">
+                  <canvas id="chartCanvas" height="380"></canvas>
+                </div>
               </div>
             </article>
           </div>
@@ -172,7 +175,7 @@
                 <input name="symbol_name" data-i18n-placeholder="config.stockNamePlaceholder" placeholder="腾讯控股" />
                 <button class="accent-btn" type="submit" data-i18n="config.addMyStock">添加自选股票</button>
               </form>
-              <div class="meta-text" data-i18n="config.myStockLimit">每位用户当前最多只能维护 1 支自选股票。</div>
+              <div id="myStockLimitHint" class="meta-text" data-i18n="config.myStockLimit">每位普通用户当前最多只能维护 1 支自选股票。</div>
               <div id="myStockError" class="error-text"></div>
               <div id="myStockList" class="list-block"></div>
             </article>
@@ -190,6 +193,25 @@
               </div>
               <textarea id="myRulesEditor" class="code-editor"></textarea>
               <button id="saveRulesBtn" class="accent-btn" type="button" data-i18n="config.saveRules">保存规则覆盖</button>
+            </article>
+          </div>
+          <div class="panel-grid">
+            <article id="forwardMetricsPanel" class="panel">
+              <div class="panel-head">
+                <h3 data-i18n="config.forwardMetrics">信号后评估窗口</h3>
+              </div>
+              <form id="forwardMetricsForm" class="stack-form">
+                <div class="meta-text" data-i18n="config.forwardMetricsHint">新出现的信号会按这里的分钟数记录最大涨幅、最大跌幅和最终涨跌幅。</div>
+                <label>
+                  <span data-i18n="config.forwardMetric1m">1m 信号窗口(分钟)</span>
+                  <input id="forwardMetric1m" name="forward_metric_1m" type="number" min="1" step="1" />
+                </label>
+                <label>
+                  <span data-i18n="config.forwardMetric5m">5m 信号窗口(分钟)</span>
+                  <input id="forwardMetric5m" name="forward_metric_5m" type="number" min="5" step="5" />
+                </label>
+                <button class="accent-btn" type="submit" data-i18n="config.saveForwardMetrics">保存评估窗口</button>
+              </form>
             </article>
           </div>
           <div class="panel-grid">

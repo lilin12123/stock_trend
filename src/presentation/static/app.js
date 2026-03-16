@@ -10,11 +10,16 @@ const state = {
   runtime: null,
   allSignals: [],
   signals: [],
+  marketSnapshots: {},
   selectedSignalId: null,
   globalStocks: [],
   myStocks: [],
   defaultRules: {},
   myRules: {},
+  forwardMetrics: {
+    '1m_horizon_minutes': 20,
+    '5m_horizon_minutes': 60,
+  },
   notifications: {},
   users: [],
   templates: [],
@@ -33,6 +38,7 @@ const state = {
   chartView: {
     mode: localStorage.getItem('chart.mode') || 'candles',
     showVwap: localStorage.getItem('chart.showVwap') !== '0',
+    collapsed: localStorage.getItem('chart.collapsed') === '1',
     visibleCount: Number(localStorage.getItem('chart.visibleCount') || 80),
     startIndex: 0,
     dragOriginX: 0,
@@ -87,6 +93,8 @@ const translations = {
     'monitor.chartModeLine': '曲线',
     'monitor.showVwap': '显示 VWAP',
     'monitor.resetChart': '重置视图',
+    'monitor.collapseChart': '收起',
+    'monitor.expandChart': '展开',
     'monitor.mySignals': '我的信号',
     'monitor.signalFilter': '关键词过滤',
     'monitor.allStocks': '全部股票',
@@ -97,6 +105,8 @@ const translations = {
     'monitor.chartHintEmpty': '请选择股票并刷新图表',
     'monitor.chartGuide': '滚轮缩放，拖动画布平移。',
     'monitor.indicatorsCount': '{count} 个同向指标',
+    'monitor.currentPrice': '现价',
+    'monitor.forwardMetrics': '{minutes}m后 最高 +{up}% · 最低 -{down}% · 收盘 {final}%',
     'monitor.noSignals': '暂无信号',
     'monitor.noChartData': '暂无图表数据',
     'monitor.noRuntimeEvents': '暂无运行事件',
@@ -116,10 +126,16 @@ const translations = {
     'config.stockNamePlaceholder': '股票名称',
     'config.addGlobalStock': '添加全局股票',
     'config.addMyStock': '添加自选股票',
-    'config.myStockLimit': '每位用户当前最多只能维护 1 支自选股票。',
+    'config.myStockLimit': '每位普通用户当前最多只能维护 1 支自选股票。',
+    'config.myStockLimitAdmin': '管理员账号可维护不限数量的自选股票。',
     'config.defaultRules': '默认规则',
     'config.myRuleOverrides': '我的规则覆盖',
     'config.saveRules': '保存规则覆盖',
+    'config.forwardMetrics': '信号后评估窗口',
+    'config.forwardMetricsHint': '新出现的信号会按这里的分钟数记录最大涨幅、最大跌幅和最终涨跌幅。',
+    'config.forwardMetric1m': '1m 信号窗口(分钟)',
+    'config.forwardMetric5m': '5m 信号窗口(分钟)',
+    'config.saveForwardMetrics': '保存评估窗口',
     'config.notifications': '通知配置',
     'config.notifyNone': '关闭所有通知',
     'config.notifyLocal': '仅本地通知',
@@ -139,7 +155,7 @@ const translations = {
     'common.saved': '已保存',
     'common.usernameTaken': '用户名已存在，请换一个。',
     'common.registrationLimitReached': '已达到注册上限。',
-    'common.watchlistLimitReached': '每位用户最多只能维护 1 支自选股票。',
+    'common.watchlistLimitReached': '每位普通用户最多只能维护 1 支自选股票。',
     'common.accountEnabled': '账号已启用',
     'common.accountDisabled': '账号已禁用',
     'common.cannotDisableSelf': '不能禁用当前登录的管理员账号',
@@ -285,6 +301,8 @@ const translations = {
     'monitor.chartModeLine': 'Line',
     'monitor.showVwap': 'Show VWAP',
     'monitor.resetChart': 'Reset View',
+    'monitor.collapseChart': 'Collapse',
+    'monitor.expandChart': 'Expand',
     'monitor.mySignals': 'My Signals',
     'monitor.signalFilter': 'Filter by keyword',
     'monitor.allStocks': 'All symbols',
@@ -295,6 +313,8 @@ const translations = {
     'monitor.chartHintEmpty': 'Select a symbol and refresh the chart',
     'monitor.chartGuide': 'Scroll to zoom and drag to pan.',
     'monitor.indicatorsCount': '{count} aligned indicators',
+    'monitor.currentPrice': 'Now',
+    'monitor.forwardMetrics': 'After {minutes}m high +{up}% · low -{down}% · close {final}%',
     'monitor.noSignals': 'No signals yet',
     'monitor.noChartData': 'No chart data yet',
     'monitor.noRuntimeEvents': 'No runtime events yet',
@@ -314,10 +334,16 @@ const translations = {
     'config.stockNamePlaceholder': 'Symbol name',
     'config.addGlobalStock': 'Add global stock',
     'config.addMyStock': 'Add my stock',
-    'config.myStockLimit': 'Each user can keep only one personal watchlist symbol for now.',
+    'config.myStockLimit': 'Each regular user can keep only one personal watchlist symbol for now.',
+    'config.myStockLimitAdmin': 'Admin accounts can keep an unlimited number of personal watchlist symbols.',
     'config.defaultRules': 'Default Rules',
     'config.myRuleOverrides': 'My Rule Overrides',
     'config.saveRules': 'Save Rule Overrides',
+    'config.forwardMetrics': 'Signal Evaluation Window',
+    'config.forwardMetricsHint': 'New signals will record max up, max down, and final change using these minute windows.',
+    'config.forwardMetric1m': '1m signal window (minutes)',
+    'config.forwardMetric5m': '5m signal window (minutes)',
+    'config.saveForwardMetrics': 'Save Evaluation Window',
     'config.notifications': 'Notifications',
     'config.notifyNone': 'Disable All Notifications',
     'config.notifyLocal': 'Local Only',
@@ -337,7 +363,7 @@ const translations = {
     'common.saved': 'Saved',
     'common.usernameTaken': 'That username already exists. Please choose another one.',
     'common.registrationLimitReached': 'The registration limit has been reached.',
-    'common.watchlistLimitReached': 'Each user can keep only one personal watchlist symbol.',
+    'common.watchlistLimitReached': 'Each regular user can keep only one personal watchlist symbol.',
     'common.accountEnabled': 'Account enabled',
     'common.accountDisabled': 'Account disabled',
     'common.cannotDisableSelf': 'You cannot disable the current admin account',
@@ -479,12 +505,14 @@ function setLanguage(language) {
   renderRuntime();
   renderStocks();
   renderRules();
+  renderForwardMetricsConfig();
   renderNotifications();
   renderUsers();
   renderSignals();
   renderTemplates();
   renderBacktests();
   renderAnalytics();
+  renderChartPanel();
   drawChart();
 }
 
@@ -594,7 +622,10 @@ function setActiveView(view) {
   document.getElementById('pageTitle').textContent = t(pageMeta[view][0]);
   document.getElementById('pageSubtitle').textContent = t(pageMeta[view][1]);
   if (view === 'monitor') {
-    requestAnimationFrame(() => drawChart());
+    requestAnimationFrame(() => {
+      renderChartPanel();
+      drawChart();
+    });
   }
 }
 
@@ -605,6 +636,7 @@ function renderSession() {
   const sessionCard = document.getElementById('sessionCard');
   const adminNavBtn = document.getElementById('adminNavBtn');
   const adminView = document.getElementById('view-admin');
+  const forwardMetricsPanel = document.getElementById('forwardMetricsPanel');
   const adminVisible = me?.user.role === 'admin';
   if (!me) {
     loginView.classList.remove('hidden');
@@ -612,6 +644,7 @@ function renderSession() {
     sessionCard.classList.add('hidden');
     adminNavBtn.classList.add('hidden');
     adminView.classList.add('hidden');
+    forwardMetricsPanel?.classList.add('hidden');
     renderRegistrationCard();
     return;
   }
@@ -622,7 +655,12 @@ function renderSession() {
   document.getElementById('sessionRole').textContent = me.user.role;
   adminView.classList.toggle('hidden', !adminVisible);
   adminNavBtn.classList.toggle('hidden', !adminVisible);
+  forwardMetricsPanel?.classList.toggle('hidden', !adminVisible);
   document.getElementById('globalStockForm').style.display = adminVisible ? 'grid' : 'none';
+  const myStockLimitHint = document.getElementById('myStockLimitHint');
+  if (myStockLimitHint) {
+    myStockLimitHint.textContent = adminVisible ? t('config.myStockLimitAdmin') : t('config.myStockLimit');
+  }
   syncNotificationForm();
   if (!adminVisible && document.querySelector('.nav-btn.active')?.dataset.view === 'admin') {
     setActiveView('monitor');
@@ -758,6 +796,26 @@ function renderRules() {
   document.getElementById('templateConfigEditor').value = JSON.stringify(mergeDeep(JSON.parse(JSON.stringify(state.defaultRules || {})), state.myRules || {}), null, 2);
 }
 
+function renderChartPanel() {
+  const panel = document.getElementById('chartPanel');
+  const body = document.getElementById('chartPanelBody');
+  const btn = document.getElementById('toggleChartPanelBtn');
+  if (!panel || !body || !btn) return;
+  const collapsed = Boolean(state.chartView.collapsed);
+  panel.classList.toggle('panel-collapsed', collapsed);
+  body.classList.toggle('hidden', collapsed);
+  btn.textContent = collapsed ? t('monitor.expandChart') : t('monitor.collapseChart');
+  btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+}
+
+function renderForwardMetricsConfig() {
+  const input1m = document.getElementById('forwardMetric1m');
+  const input5m = document.getElementById('forwardMetric5m');
+  if (!input1m || !input5m) return;
+  input1m.value = state.forwardMetrics['1m_horizon_minutes'] ?? 20;
+  input5m.value = state.forwardMetrics['5m_horizon_minutes'] ?? 60;
+}
+
 function renderNotifications() {
   const form = document.getElementById('notificationForm');
   if (!form) return;
@@ -862,12 +920,46 @@ function renderSignals() {
         <span class="signal-pill ${signal.direction || ''}">${t(`direction.${signal.direction || 'neutral'}`)}</span>
       </div>
       <div class="meta-line">${formatBeijingDateTime(signal.ts)} · ${t('monitor.indicatorsCount', { count: signal.trigger_count || (signal.triggers || []).length || 1 })}</div>
+      ${renderSignalPrice(signal)}
       <div>${escapeHtml(signalTriggerLabels(signal).join(' · '))}</div>
       <div class="meta-line">${escapeHtml(signal.message || '')}</div>
+      ${renderForwardMetrics(signal)}
     </div>`).join('') : `<div class="meta-line">${t('monitor.noSignals')}</div>`;
   list.querySelectorAll('.signal-card').forEach(card => {
     card.addEventListener('click', () => selectSignal(card.dataset.signalId));
   });
+}
+
+function renderSignalPrice(signal) {
+  const snapshot = state.marketSnapshots?.[signal.symbol];
+  if (!snapshot || !Number.isFinite(Number(snapshot.last_price))) return '';
+  const change = Number(snapshot.change_pct);
+  const changeClass = !Number.isFinite(change)
+    ? 'flat'
+    : (change > 0 ? 'up' : (change < 0 ? 'down' : 'flat'));
+  const changeText = Number.isFinite(change) ? `${change >= 0 ? '+' : ''}${change.toFixed(2)}%` : '--';
+  return `<div class="meta-line signal-price-line"><span>${t('monitor.currentPrice')}</span> <strong>${formatNumber(snapshot.last_price, 2)}</strong> <span class="signal-metric-value ${changeClass}">${escapeHtml(changeText)}</span></div>`;
+}
+
+function renderForwardMetrics(signal) {
+  const metrics = signal?.evaluation;
+  if (
+    !metrics
+    || !metrics.completed
+    || !Number.isFinite(Number(metrics.max_up))
+    || !Number.isFinite(Number(metrics.max_down))
+    || !Number.isFinite(Number(metrics.final_change))
+  ) {
+    return '';
+  }
+  const prefix = state.language === 'zh' ? `${metrics.horizon_minutes ?? '-'}m后` : `After ${metrics.horizon_minutes ?? '-'}m`;
+  const finalClass = Number(metrics.final_change) > 0 ? 'up' : (Number(metrics.final_change) < 0 ? 'down' : 'flat');
+  return `<div class="meta-line signal-evaluation-line">
+    <span>${escapeHtml(prefix)}</span>
+    <span> ${state.language === 'zh' ? '最高' : 'high'} </span><span class="signal-metric-value up">+${formatNumber(metrics.max_up, 2)}%</span>
+    <span> · ${state.language === 'zh' ? '最低' : 'low'} </span><span class="signal-metric-value down">-${formatNumber(metrics.max_down, 2)}%</span>
+    <span> · ${state.language === 'zh' ? '收盘' : 'close'} </span><span class="signal-metric-value ${finalClass}">${formatSignedNumber(metrics.final_change, 2)}%</span>
+  </div>`;
 }
 
 function renderTemplates() {
@@ -1077,6 +1169,11 @@ function chartSignalsForCurrentView() {
 function drawChart() {
   const canvas = document.getElementById('chartCanvas');
   if (!canvas) return;
+  if (state.chartView.collapsed) {
+    const meta = document.getElementById('chartMeta');
+    if (meta) meta.textContent = '';
+    return;
+  }
   const ctx = canvas.getContext('2d');
   const bars = state.chartBars || [];
   const ratio = window.devicePixelRatio || 1;
@@ -1265,25 +1362,38 @@ async function refreshRuntime() {
 }
 
 async function refreshConfig() {
-  const [globalStocks, myStocks, defaultRules, myRules, notifications] = await Promise.all([
+  const requests = [
     fetchJSON('/api/stocks/global'),
     fetchJSON('/api/stocks/mine'),
     fetchJSON('/api/rules/default'),
     fetchJSON('/api/rules/mine'),
     fetchJSON('/api/notifications/mine'),
-  ]);
+  ];
+  if (state.me?.user.role === 'admin') {
+    requests.push(fetchJSON('/api/forward-metrics'));
+  }
+  const [globalStocks, myStocks, defaultRules, myRules, notifications, forwardMetrics] = await Promise.all(requests);
   state.globalStocks = globalStocks;
   state.myStocks = myStocks;
   state.defaultRules = defaultRules;
   state.myRules = myRules;
   state.notifications = notifications;
+  if (forwardMetrics) {
+    state.forwardMetrics = forwardMetrics;
+  }
   renderStocks();
   renderRules();
+  renderForwardMetricsConfig();
   renderNotifications();
 }
 
 async function refreshSignals() {
-  state.allSignals = await fetchJSON('/api/signals?limit=200');
+  const [signals, marketSnapshots] = await Promise.all([
+    fetchJSON('/api/signals?limit=200'),
+    fetchJSON('/api/market-snapshots'),
+  ]);
+  state.allSignals = signals;
+  state.marketSnapshots = marketSnapshots || {};
   applySignalFilters();
 }
 
@@ -1416,6 +1526,12 @@ function formatNumber(value, digits = 2) {
   const num = Number(value);
   if (!Number.isFinite(num)) return '-';
   return num.toFixed(digits);
+}
+
+function formatSignedNumber(value, digits = 2) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return '-';
+  return `${num >= 0 ? '+' : ''}${num.toFixed(digits)}`;
 }
 
 function backtestRuleLabel(ruleKey) {
@@ -1625,6 +1741,14 @@ function bindEvents() {
   document.getElementById('refreshAllBtn').addEventListener('click', refreshAll);
   document.getElementById('refreshRuntimeBtn').addEventListener('click', refreshRuntime);
   document.getElementById('refreshChartBtn').addEventListener('click', () => refreshChart(false));
+  document.getElementById('toggleChartPanelBtn').addEventListener('click', () => {
+    state.chartView.collapsed = !state.chartView.collapsed;
+    localStorage.setItem('chart.collapsed', state.chartView.collapsed ? '1' : '0');
+    renderChartPanel();
+    if (!state.chartView.collapsed) {
+      requestAnimationFrame(() => drawChart());
+    }
+  });
   document.getElementById('signalTextFilter').addEventListener('input', applySignalFilters);
   document.getElementById('signalSymbolFilter').addEventListener('change', applySignalFilters);
   document.getElementById('signalTfFilter').addEventListener('change', applySignalFilters);
@@ -1689,6 +1813,21 @@ function bindEvents() {
     });
     state.myRules = parsed;
     renderRules();
+  });
+
+  document.getElementById('forwardMetricsForm').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const payload = {
+      '1m_horizon_minutes': Number(form.forward_metric_1m.value),
+      '5m_horizon_minutes': Number(form.forward_metric_5m.value),
+    };
+    state.forwardMetrics = await fetchJSON('/api/forward-metrics', {
+      method: 'PUT',
+      body: JSON.stringify(payload),
+    });
+    renderForwardMetricsConfig();
+    alert(t('common.saved'));
   });
 
   document.getElementById('notificationForm').mode.addEventListener('change', () => {

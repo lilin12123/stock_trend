@@ -162,6 +162,8 @@ class LocalWebApp:
                     text=params.get("text", [None])[0],
                 )
                 return self._write_json(handler, items)
+            if path == "/api/market-snapshots" and method == "GET":
+                return self._write_json(handler, self.monitoring_service.get_market_snapshots())
             if path.startswith("/api/signals/") and method == "GET":
                 signal_id = path.rsplit("/", 1)[-1]
                 item = self.store.get_signal(signal_id)
@@ -202,6 +204,14 @@ class LocalWebApp:
                 return self._write_json(handler, {"ok": True})
             if path == "/api/rules/default" and method == "GET":
                 return self._write_json(handler, self.store.get_default_rule_config())
+            if path == "/api/forward-metrics":
+                if method == "GET":
+                    return self._write_json(handler, self.store.get_forward_metrics_config(self.app_cfg))
+                self._require_admin(user)
+                payload = self._read_json(handler)
+                saved = self.store.save_forward_metrics_config(payload, self.app_cfg)
+                self.monitoring_service.apply_config()
+                return self._write_json(handler, saved)
             if path == "/api/rules/mine":
                 if method == "GET":
                     return self._write_json(handler, self.store.get_user_rule_overrides(int(user["id"])))

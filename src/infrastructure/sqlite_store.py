@@ -182,6 +182,11 @@ class SqliteStore:
                     FOREIGN KEY(signal_id) REFERENCES signals(id) ON DELETE CASCADE,
                     FOREIGN KEY(owner_user_id) REFERENCES users(id) ON DELETE SET NULL
                 );
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 """
             )
             self._ensure_column(conn, "users", "failed_login_attempts", "INTEGER NOT NULL DEFAULT 0")
@@ -254,6 +259,25 @@ class SqliteStore:
                     VALUES (NULL, 'global', 'default', ?, ?, ?)
                     """,
                     (json.dumps(cfg.get("rules", {}), ensure_ascii=False), now, now),
+                )
+
+            if conn.execute("SELECT COUNT(*) AS c FROM app_settings WHERE key = 'forward_metrics'").fetchone()["c"] == 0:
+                forward_cfg = app_cfg.get("forward_metrics", {})
+                conn.execute(
+                    """
+                    INSERT INTO app_settings (key, value_json, updated_at)
+                    VALUES ('forward_metrics', ?, ?)
+                    """,
+                    (
+                        json.dumps(
+                            {
+                                "1m_horizon_minutes": int(forward_cfg.get("1m_horizon_minutes", 20)),
+                                "5m_horizon_minutes": int(forward_cfg.get("5m_horizon_minutes", 60)),
+                            },
+                            ensure_ascii=False,
+                        ),
+                        now,
+                    ),
                 )
 
             if admin_id and conn.execute(
@@ -510,12 +534,14 @@ class SqliteStore:
         if not symbol:
             raise ValueError("Symbol is required")
         with self._connect() as conn:
+            user_row = conn.execute("SELECT role FROM users WHERE id = ?", (user_id,)).fetchone()
+            role = str(user_row["role"]) if user_row else "user"
             existing_rows = conn.execute(
                 "SELECT symbol FROM user_symbols WHERE user_id = ?",
                 (user_id,),
             ).fetchall()
             existing_symbols = {str(row["symbol"]) for row in existing_rows}
-            if symbol not in existing_symbols and existing_symbols:
+            if role != "admin" and symbol not in existing_symbols and existing_symbols:
                 raise ValueError("Personal watchlist is limited to one symbol")
             conn.execute(
                 """
@@ -532,6 +558,43 @@ class SqliteStore:
                 "SELECT config_json FROM rule_profiles WHERE scope = 'global' ORDER BY id DESC LIMIT 1"
             ).fetchone()
         return json.loads(row["config_json"]) if row else {}
+
+    def get_forward_metrics_config(self, app_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+        defaults = {
+            "1m_horizon_minutes": int((app_cfg or {}).get("forward_metrics", {}).get("1m_horizon_minutes", 20)),
+            "5m_horizon_minutes": int((app_cfg or {}).get("forward_metrics", {}).get("5m_horizon_minutes", 60)),
+        }
+        with self._connect() as conn:
+            row = conn.execute("SELECT value_json FROM app_settings WHERE key = 'forward_metrics'").fetchone()
+        if not row:
+            return defaults
+        try:
+            stored = json.loads(row["value_json"] or "{}")
+        except json.JSONDecodeError:
+            return defaults
+        return {
+            "1m_horizon_minutes": max(1, int(stored.get("1m_horizon_minutes", defaults["1m_horizon_minutes"]))),
+            "5m_horizon_minutes": max(5, int(stored.get("5m_horizon_minutes", defaults["5m_horizon_minutes"]))),
+        }
+
+    def save_forward_metrics_config(self, data: Dict[str, Any], app_cfg: Optional[Dict[str, Any]] = None) -> Dict[str, int]:
+        current = self.get_forward_metrics_config(app_cfg)
+        cleaned = {
+            "1m_horizon_minutes": max(1, int(data.get("1m_horizon_minutes", current["1m_horizon_minutes"]))),
+            "5m_horizon_minutes": max(5, int(data.get("5m_horizon_minutes", current["5m_horizon_minutes"]))),
+        }
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO app_settings (key, value_json, updated_at)
+                VALUES ('forward_metrics', ?, ?)
+                ON CONFLICT(key) DO UPDATE SET
+                    value_json = excluded.value_json,
+                    updated_at = excluded.updated_at
+                """,
+                (json.dumps(cleaned, ensure_ascii=False), _utc_now()),
+            )
+        return cleaned
 
     def get_user_rule_overrides(self, user_id: int) -> Dict[str, Any]:
         with self._connect() as conn:
@@ -645,6 +708,13 @@ class SqliteStore:
                     (signal_id, trigger.name, trigger.direction, trigger.message),
                 )
         return signal_id
+
+    def update_signal_context_snapshot(self, signal_id: str, context_snapshot: Dict[str, Any]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE signals SET context_snapshot = ? WHERE id = ?",
+                (json.dumps(context_snapshot or {}, ensure_ascii=False), signal_id),
+            )
 
     def list_signals_raw(
         self,

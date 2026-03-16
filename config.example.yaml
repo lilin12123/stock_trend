@@ -11,6 +11,9 @@ app:
     host: "127.0.0.1"          # OpenD 地址
     port: 11111                # OpenD 端口
   timeframes: ["1m", "5m"]     # 订阅周期
+  forward_metrics:
+    1m_horizon_minutes: 20     # 新信号后评估窗口：1m看未来20分钟
+    5m_horizon_minutes: 60     # 新信号后评估窗口：5m看未来60分钟
   symbols:                     # 监控股票池
     - "HK.00981"  # 中芯国际
     - "HK.01810"  # 小米集团

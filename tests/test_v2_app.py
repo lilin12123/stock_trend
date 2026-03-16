@@ -11,6 +11,7 @@ from src.application.backtesting import BacktestRunner
 from src.application.market_profile import (
     detect_market_code,
     get_market_profile,
+    market_day_close,
     market_effective_trade_date,
     market_previous_trading_date,
     market_trading_session,
@@ -75,6 +76,7 @@ class V2AppTests(unittest.TestCase):
                 },
                 "open_d": {"host": "127.0.0.1", "port": 11111},
                 "timeframes": ["1m", "5m"],
+                "forward_metrics": {"1m_horizon_minutes": 20, "5m_horizon_minutes": 60},
                 "symbols": ["HK.00700", "HK.00981"],
                 "symbol_names": {"HK.00700": "腾讯控股", "HK.00981": "中芯国际"},
                 "notify": {"mode": "local", "telegram": {"token": "", "chat_id": ""}},
@@ -186,6 +188,30 @@ class V2AppTests(unittest.TestCase):
         user_profile = next(profile for profile in profiles if profile.scope == "user" and profile.owner_user_id == user_id)
         self.assertEqual(user_profile.symbols, {"HK.01810"})
 
+    def test_store_forward_metrics_config_can_be_updated(self) -> None:
+        self.assertEqual(
+            self.store.get_forward_metrics_config(self.cfg["app"]),
+            {"1m_horizon_minutes": 20, "5m_horizon_minutes": 60},
+        )
+        saved = self.store.save_forward_metrics_config(
+            {"1m_horizon_minutes": 30, "5m_horizon_minutes": 90},
+            self.cfg["app"],
+        )
+        self.assertEqual(saved, {"1m_horizon_minutes": 30, "5m_horizon_minutes": 90})
+        self.assertEqual(self.store.get_forward_metrics_config(self.cfg["app"]), saved)
+
+    def test_monitoring_uses_configurable_forward_metrics_window(self) -> None:
+        self.store.save_forward_metrics_config({"1m_horizon_minutes": 12, "5m_horizon_minutes": 75}, self.cfg["app"])
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=FakeGateway(),
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+        self.assertEqual(monitoring._evaluation_window("1m"), (12, 12))
+        self.assertEqual(monitoring._evaluation_window("5m"), (75, 15))
+
     def test_signal_query_merges_same_minute(self) -> None:
         user_id = self.store.create_user("bob", self.hasher.hash_password("pw"), "user")
         ts = datetime.fromisoformat("2026-03-13T10:15:00+08:00")
@@ -246,6 +272,42 @@ class V2AppTests(unittest.TestCase):
         items = query.list_signals(owner_user_id=user_id, limit=20, symbol="US.NVDA", timeframe="1m")
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message"], "carry overnight")
+
+    def test_signal_query_returns_completed_forward_metrics(self) -> None:
+        user_id = self.store.create_user("metrics", self.hasher.hash_password("pw"), "user")
+        ts = datetime.fromisoformat("2026-03-13T10:15:00+08:00")
+        signal = Signal(
+            symbol="HK.00700",
+            symbol_name="腾讯控股",
+            timeframe="1m",
+            ts=ts,
+            rule="rsi_oversold",
+            message="metric signal",
+            direction="up",
+            scope="user",
+            owner_user_id=user_id,
+            source_rule="rsi_oversold",
+            dedupe_key="metric-1",
+            context_snapshot={
+                "forward_metrics": {
+                    "horizon_minutes": 20,
+                    "target_bars": 20,
+                    "observed_bars": 20,
+                    "max_up": 3.2,
+                    "max_down": 1.1,
+                    "final_change": -0.8,
+                    "completed": True,
+                },
+            },
+        )
+        self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
+
+        items = SignalQueryService(self.store).list_signals(owner_user_id=user_id, limit=20)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["evaluation"]["horizon_minutes"], 20)
+        self.assertAlmostEqual(items[0]["evaluation"]["max_up"], 3.2)
+        self.assertAlmostEqual(items[0]["evaluation"]["max_down"], 1.1)
+        self.assertAlmostEqual(items[0]["evaluation"]["final_change"], -0.8)
 
     def test_signal_query_offsets_opposite_directions(self) -> None:
         user_id = self.store.create_user("erin", self.hasher.hash_password("pw"), "user")
@@ -488,6 +550,215 @@ class V2AppTests(unittest.TestCase):
         remaining_us = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
         self.assertEqual(remaining_us, [])
 
+    def test_monitoring_records_forward_metrics_for_new_signal(self) -> None:
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=FakeGateway(),
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+        signal = Signal(
+            symbol="HK.00700",
+            symbol_name="腾讯控股",
+            timeframe="1m",
+            ts=datetime.fromisoformat("2026-03-13T10:00:00+08:00"),
+            rule="rsi_oversold",
+            message="forward metrics",
+            direction="up",
+            scope="global",
+            owner_user_id=None,
+            source_rule="rsi_oversold",
+            dedupe_key="forward-metrics",
+            context_snapshot={"forward_metrics": monitoring._initial_forward_metrics("1m")},
+            signal_id="forward-metrics-signal",
+        )
+        self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
+        monitoring._register_signal_evaluation(signal.signal_id, signal, 100.0)
+
+        for offset in range(1, 21):
+            close = 100.0 + offset * 0.1
+            if offset == 20:
+                close = 98.0
+            bar = Bar(
+                symbol="HK.00700",
+                timeframe="1m",
+                ts=datetime(2026, 3, 13, 10, offset, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+                open=100.0,
+                high=103.0 if offset == 10 else close + 0.2,
+                low=95.0 if offset == 20 else close - 0.2,
+                close=close,
+                volume=1000.0,
+            )
+            monitoring.on_bar(bar)
+
+        stored = self.store.get_signal(signal.signal_id)
+        metrics = stored["context_snapshot"]["forward_metrics"]
+        self.assertTrue(metrics["completed"])
+        self.assertEqual(metrics["horizon_minutes"], 20)
+        self.assertEqual(metrics["observed_bars"], 20)
+        self.assertAlmostEqual(metrics["max_up"], 3.0, places=4)
+        self.assertAlmostEqual(metrics["max_down"], 5.0, places=4)
+        self.assertAlmostEqual(metrics["final_change"], -2.0, places=4)
+
+    def test_monitoring_does_not_count_same_bar_updates_multiple_times(self) -> None:
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=FakeGateway(),
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+        signal = Signal(
+            symbol="HK.00700",
+            symbol_name="腾讯控股",
+            timeframe="1m",
+            ts=datetime.fromisoformat("2026-03-16T10:59:00+08:00"),
+            rule="rsi_oversold",
+            message="same bar updates",
+            direction="up",
+            scope="global",
+            owner_user_id=None,
+            source_rule="rsi_oversold",
+            dedupe_key="same-bar-updates",
+            context_snapshot={"forward_metrics": monitoring._initial_forward_metrics("1m")},
+            signal_id="same-bar-updates-signal",
+        )
+        self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
+        monitoring._register_signal_evaluation(signal.signal_id, signal, 100.0)
+
+        same_bar = Bar(
+            symbol="HK.00700",
+            timeframe="1m",
+            ts=datetime(2026, 3, 16, 10, 59, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+            open=100.0,
+            high=100.2,
+            low=99.9,
+            close=100.1,
+            volume=1000.0,
+        )
+        next_bar = Bar(
+            symbol="HK.00700",
+            timeframe="1m",
+            ts=datetime(2026, 3, 16, 11, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+            open=100.1,
+            high=100.3,
+            low=99.8,
+            close=100.2,
+            volume=1200.0,
+        )
+
+        monitoring.on_bar(same_bar)
+        monitoring.on_bar(same_bar)
+        monitoring.on_bar(next_bar)
+        monitoring.on_bar(next_bar)
+
+        pending = monitoring._pending_signal_evaluations["HK.00700:1m"][0]
+        self.assertEqual(pending.observed_bars, 1)
+        self.assertEqual(pending.last_observed_bar_ts, next_bar.ts.isoformat())
+        self.assertAlmostEqual(pending.max_up, 0.3, places=4)
+        self.assertAlmostEqual(pending.max_down, 0.2, places=4)
+        self.assertAlmostEqual(pending.final_change, 0.2, places=4)
+
+    def test_monitoring_updates_market_snapshot_with_change_pct(self) -> None:
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=FakeGateway(),
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+        monitoring._market_snapshots["HK.00700"] = {
+            "symbol": "HK.00700",
+            "trade_date": "2026-03-13",
+            "prev_close": 100.0,
+            "last_price": None,
+            "change_pct": None,
+            "last_ts": None,
+            "timeframe": None,
+        }
+        monitoring._market_reference_days["HK.00700"] = "2026-03-13"
+
+        bar = Bar(
+            symbol="HK.00700",
+            timeframe="1m",
+            ts=datetime(2026, 3, 13, 10, 1, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+            open=100.0,
+            high=103.0,
+            low=99.8,
+            close=102.5,
+            volume=1000.0,
+        )
+        monitoring._track_bar(bar)
+
+        snapshot = monitoring.get_market_snapshots()["HK.00700"]
+        self.assertEqual(snapshot["last_price"], 102.5)
+        self.assertEqual(snapshot["timeframe"], "1m")
+        self.assertAlmostEqual(snapshot["change_pct"], 2.5)
+
+    def test_market_day_close_uses_last_session_close(self) -> None:
+        hk_close = market_day_close(
+            "HK.00700",
+            datetime(2026, 3, 13, 10, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+            "Asia/Hong_Kong",
+        )
+        us_close = market_day_close(
+            "US.NVDA",
+            datetime(2026, 3, 13, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+            "Asia/Hong_Kong",
+        )
+        self.assertEqual(hk_close.hour, 16)
+        self.assertEqual(hk_close.minute, 0)
+        self.assertEqual(us_close.hour, 16)
+        self.assertEqual(us_close.minute, 0)
+
+    def test_monitoring_completes_near_close_evaluation_at_market_close(self) -> None:
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=FakeGateway(),
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+        signal = Signal(
+            symbol="US.NVDA",
+            symbol_name="NVIDIA",
+            timeframe="1m",
+            ts=datetime(2026, 3, 13, 15, 58, tzinfo=ZoneInfo("America/New_York")),
+            rule="rsi_oversold",
+            message="near close",
+            direction="up",
+            scope="global",
+            owner_user_id=None,
+            source_rule="rsi_oversold",
+            dedupe_key="near-close",
+            context_snapshot={"forward_metrics": monitoring._initial_forward_metrics("1m")},
+            signal_id="near-close-signal",
+        )
+        self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
+        monitoring._register_signal_evaluation(signal.signal_id, signal, 100.0)
+
+        last_bar = Bar(
+            symbol="US.NVDA",
+            timeframe="1m",
+            ts=datetime(2026, 3, 13, 15, 59, tzinfo=ZoneInfo("America/New_York")),
+            open=100.0,
+            high=101.5,
+            low=99.5,
+            close=101.0,
+            volume=1200.0,
+        )
+        monitoring.on_bar(last_bar)
+
+        stored = self.store.get_signal(signal.signal_id)
+        metrics = stored["context_snapshot"]["forward_metrics"]
+        self.assertTrue(metrics["completed"])
+        self.assertTrue(metrics["completed_by_close"])
+        self.assertEqual(metrics["observed_bars"], 1)
+        self.assertAlmostEqual(metrics["max_up"], 1.5, places=4)
+        self.assertAlmostEqual(metrics["max_down"], 0.5, places=4)
+        self.assertAlmostEqual(metrics["final_change"], 1.0, places=4)
+
     def test_monitoring_warmup_uses_effective_trade_day_for_chart_data(self) -> None:
         gateway = FakeGateway()
         monitoring = MonitoringService(
@@ -588,6 +859,13 @@ class V2AppTests(unittest.TestCase):
         self.store.add_user_symbol(user_id, "HK.00700", "腾讯控股", True)
         with self.assertRaisesRegex(ValueError, "limited to one symbol"):
             self.store.add_user_symbol(user_id, "HK.00981", "中芯国际", True)
+
+    def test_admin_personal_watchlist_is_unlimited(self) -> None:
+        admin_id = 1
+        self.store.add_user_symbol(admin_id, "HK.00700", "腾讯控股", True)
+        self.store.add_user_symbol(admin_id, "US.NVDA", "NVIDIA", True)
+        items = self.store.list_user_symbols(admin_id)
+        self.assertEqual({item["symbol"] for item in items}, {"HK.00700", "US.NVDA"})
 
     def test_updating_same_personal_symbol_still_allowed(self) -> None:
         user_id = self.store.create_user("ian", self.hasher.hash_password("pw"), "user")

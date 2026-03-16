@@ -50,6 +50,10 @@ class SignalQueryService:
                     "dominant_items": {},
                 }
                 merged[key] = aggregated
+            aggregated["context_snapshot"] = self._merge_context_snapshot(
+                aggregated.get("context_snapshot") or {},
+                item.get("context_snapshot") or {},
+            )
             aggregated["triggers"] = self._merge_triggers(aggregated.get("triggers") or [], normalized)
             item_strengths = self._direction_counts(normalized)
             for direction in ("up", "down"):
@@ -80,6 +84,7 @@ class SignalQueryService:
                     **base,
                     "direction": direction,
                     "triggers": filtered_triggers,
+                    "evaluation": (base.get("context_snapshot") or {}).get("forward_metrics"),
                     "level": self._count_to_level(trigger_count),
                     "trigger_count": trigger_count,
                     "message": dominant.get("message") or aggregated.get("message"),
@@ -194,3 +199,17 @@ class SignalQueryService:
         if rule_name and rule_name not in out:
             out[rule_name] = {"name": rule_name, "direction": item.get("direction") or "neutral", "ts": base_ts}
         return self._resolve_exclusive(list(out.values()))
+
+    @staticmethod
+    def _merge_context_snapshot(left: Dict, right: Dict) -> Dict:
+        merged = {**(left or {})}
+        right = right or {}
+        left_metrics = (left or {}).get("forward_metrics")
+        right_metrics = right.get("forward_metrics")
+        if right_metrics and (
+            not left_metrics
+            or (right_metrics.get("completed") and not left_metrics.get("completed"))
+            or (right_metrics.get("observed_bars", 0) >= left_metrics.get("observed_bars", 0))
+        ):
+            merged["forward_metrics"] = right_metrics
+        return merged
