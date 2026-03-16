@@ -24,7 +24,9 @@ from src.application.subscriptions import SubscriptionPlanner
 from src.domain import Bar, Signal, Trigger
 from src.infrastructure import PasswordHasher, SqliteStore
 from src.presentation.web import LocalWebApp
+from src.rules.rule_engine import RuleConfig, RuleEngine
 from src.rules.indicators.open_range import OpenRangeState, open_range_breakout
+from src.storage.state import StateStore
 
 
 class FakeGateway:
@@ -468,6 +470,26 @@ class V2AppTests(unittest.TestCase):
         self.assertTrue(status.started)
         self.assertIn("HK.00700", status.active_symbols)
         self.assertEqual(len(gateway.started), 1)
+
+    def test_rule_cfg_respects_timeframe_enabled_override(self) -> None:
+        engine = RuleEngine(
+            config=RuleConfig(
+                cooldown_seconds=120,
+                open_range_breakout={},
+                vwap_deviation={},
+                squeeze_breakout={"enabled": True, "tf_overrides": {"1m": {"enabled": False}}},
+                rsi_extreme={"enabled": True, "tf_overrides": {"1m": {"enabled": False}, "5m": {"enabled": True}}},
+                break_retest={},
+                volume_price_divergence={},
+                prev_day_break={},
+            ),
+            store=StateStore(atr_period=14, vol_avg_period=20, atr_lookback=48),
+        )
+
+        self.assertFalse(engine._rule_cfg(engine.config.squeeze_breakout, "1m")["enabled"])
+        self.assertTrue(engine._rule_cfg(engine.config.squeeze_breakout, "5m")["enabled"])
+        self.assertFalse(engine._rule_cfg(engine.config.rsi_extreme, "1m")["enabled"])
+        self.assertTrue(engine._rule_cfg(engine.config.rsi_extreme, "5m")["enabled"])
 
     def test_monitoring_apply_config_skips_symbols_that_fail_warmup(self) -> None:
         gateway = FakeGateway()

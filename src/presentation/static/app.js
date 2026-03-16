@@ -11,7 +11,7 @@ const state = {
   allSignals: [],
   signals: [],
   signalPage: {
-    limit: 100,
+    limit: Number(localStorage.getItem('signals.pageSize') || 100),
     offset: 0,
     total: 0,
     hasMore: false,
@@ -99,8 +99,8 @@ const translations = {
     'monitor.chartModeLine': '曲线',
     'monitor.showVwap': '显示 VWAP',
     'monitor.resetChart': '重置视图',
-    'monitor.collapseChart': '收起',
-    'monitor.expandChart': '展开',
+    'monitor.collapseChart': '收起图表',
+    'monitor.expandChart': '展开图表',
     'monitor.mySignals': '我的信号',
     'monitor.signalFilter': '关键词过滤',
     'monitor.allStocks': '全部股票',
@@ -114,6 +114,7 @@ const translations = {
     'monitor.currentPrice': '现价',
     'monitor.forwardMetrics': '{minutes}m后 最高 +{up}% · 最低 -{down}% · 收盘 {final}%',
     'monitor.signalPageSummary': '第 {page} / {pages} 页 · 共 {total} 条',
+    'monitor.signalPageSize': '每页',
     'monitor.noSignals': '暂无信号',
     'monitor.noChartData': '暂无图表数据',
     'monitor.noRuntimeEvents': '暂无运行事件',
@@ -312,8 +313,8 @@ const translations = {
     'monitor.chartModeLine': 'Line',
     'monitor.showVwap': 'Show VWAP',
     'monitor.resetChart': 'Reset View',
-    'monitor.collapseChart': 'Collapse',
-    'monitor.expandChart': 'Expand',
+    'monitor.collapseChart': 'Hide Chart',
+    'monitor.expandChart': 'Show Chart',
     'monitor.mySignals': 'My Signals',
     'monitor.signalFilter': 'Filter by keyword',
     'monitor.allStocks': 'All symbols',
@@ -327,6 +328,7 @@ const translations = {
     'monitor.currentPrice': 'Now',
     'monitor.forwardMetrics': 'After {minutes}m high +{up}% · low -{down}% · close {final}%',
     'monitor.signalPageSummary': 'Page {page} / {pages} · {total} total',
+    'monitor.signalPageSize': 'Per page',
     'monitor.noSignals': 'No signals yet',
     'monitor.noChartData': 'No chart data yet',
     'monitor.noRuntimeEvents': 'No runtime events yet',
@@ -810,12 +812,15 @@ function renderRules() {
 }
 
 function renderChartPanel() {
+  const grid = document.getElementById('monitorMainGrid');
   const panel = document.getElementById('chartPanel');
   const body = document.getElementById('chartPanelBody');
   const btn = document.getElementById('toggleChartPanelBtn');
-  if (!panel || !body || !btn) return;
+  if (!grid || !panel || !body || !btn) return;
   const collapsed = Boolean(state.chartView.collapsed);
+  grid.classList.toggle('chart-collapsed', collapsed);
   panel.classList.toggle('panel-collapsed', collapsed);
+  panel.classList.toggle('hidden', collapsed);
   body.classList.toggle('hidden', collapsed);
   btn.textContent = collapsed ? t('monitor.expandChart') : t('monitor.collapseChart');
   btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -953,12 +958,28 @@ function renderSignalPager() {
   const currentPage = total ? Math.floor(offset / limit) + 1 : 1;
   const totalPages = Math.max(1, Math.ceil(total / limit));
   pager.innerHTML = `
-    <span class="meta-line">${t('monitor.signalPageSummary', { page: currentPage, pages: totalPages, total })}</span>
+    <div class="pager-meta">
+      <label class="pager-size-control">
+        <span class="meta-line">${t('monitor.signalPageSize')}</span>
+        <select id="signalPageSizeSelect">
+          ${[20, 50, 100].map(size => `<option value="${size}" ${size === limit ? 'selected' : ''}>${size}</option>`).join('')}
+        </select>
+      </label>
+      <span class="meta-line">${t('monitor.signalPageSummary', { page: currentPage, pages: totalPages, total, limit })}</span>
+    </div>
     <div class="pager-actions">
       <button id="signalPrevPageBtn" class="mini-btn" type="button" ${offset <= 0 ? 'disabled' : ''}>${t('common.prev')}</button>
       <button id="signalNextPageBtn" class="mini-btn" type="button" ${!state.signalPage?.hasMore ? 'disabled' : ''}>${t('common.next')}</button>
     </div>
   `;
+  document.getElementById('signalPageSizeSelect')?.addEventListener('change', event => {
+    const nextLimit = Number(event.currentTarget.value || 100);
+    if (!Number.isFinite(nextLimit) || nextLimit <= 0) return;
+    state.signalPage.limit = nextLimit;
+    state.signalPage.offset = 0;
+    localStorage.setItem('signals.pageSize', String(nextLimit));
+    refreshSignals();
+  });
   document.getElementById('signalPrevPageBtn')?.addEventListener('click', () => changeSignalPage(-1));
   document.getElementById('signalNextPageBtn')?.addEventListener('click', () => changeSignalPage(1));
 }

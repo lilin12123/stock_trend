@@ -93,10 +93,13 @@
         </header>
 
         <section id="view-monitor" class="view active">
-          <div class="panel-grid">
-            <article class="panel">
+          <div id="monitorMainGrid" class="panel-grid monitor-main-grid">
+            <article id="signalPanel" class="panel signal-panel">
               <div class="panel-head">
-                <h3 data-i18n="monitor.mySignals">我的信号</h3>
+                <div class="panel-title-row">
+                  <h3 data-i18n="monitor.mySignals">我的信号</h3>
+                  <button id="toggleChartPanelBtn" class="mini-btn" type="button">收起图表参数</button>
+                </div>
                 <div class="toolbar">
                   <input id="signalTextFilter" data-i18n-placeholder="monitor.signalFilter" placeholder="关键词过滤" />
                   <select id="signalSymbolFilter">
@@ -115,7 +118,6 @@
             <article id="chartPanel" class="panel">
               <div class="panel-head">
                 <h3 data-i18n="monitor.chartParams">图表参数</h3>
-                <button id="toggleChartPanelBtn" class="mini-btn" type="button">收起</button>
               </div>
               <div id="chartPanelBody" class="panel-body">
                 <div class="toolbar chart-toolbar">

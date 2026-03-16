@@ -38,6 +38,13 @@
 - `volume_price_divergence`：量价背离
 - `prev_day_break`：昨日高低点突破
 
+当前默认配置在策略取向上做了两点收敛：
+
+- `1m` 信号比 `5m` 更保守，优先减少盘中噪音
+- `squeeze_breakout` 默认只在 `5m` 启用
+- `rsi_extreme` 默认只在 `5m` 启用，阈值收紧为 `75 / 25`
+- `volume_price_divergence` 默认关闭，不参与常规主信号流
+
 这些规则的输出方式需要注意：
 
 - 系统先按规则识别原始触发
@@ -73,7 +80,7 @@ cp config.example.yaml config.yaml
 - `app.auth.bootstrap_admin`：首个本地管理员账号
 - `app.auth.public_registration`：未登录页面的自助注册开关与人数上限
 - `app.symbols`：全局股票池初始化值
-- `app.storage.db_path`：SQLite 数据库文件
+- `app.storage.db_path`：SQLite 数据库文件，当前默认放在 `var/app.sqlite`
 - `rules.cooldown_seconds`：同一规则冷却时间（秒）
 - `rules.*`：各条规则的开关与参数
 
