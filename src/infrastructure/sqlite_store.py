@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import secrets
 import sqlite3
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 from ..domain import NotificationSetting, Signal, Trigger, User
 
@@ -24,11 +25,19 @@ class SqliteStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._init_schema()
 
-    def _connect(self) -> sqlite3.Connection:
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         conn = sqlite3.connect(self.path)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        return conn
+        try:
+            yield conn
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
 
     def _init_schema(self) -> None:
         with self._connect() as conn:
@@ -115,6 +124,28 @@ class SqliteStore:
                     message TEXT NOT NULL,
                     FOREIGN KEY(signal_id) REFERENCES signals(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS merged_signals (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id INTEGER,
+                    scope TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    symbol_name TEXT,
+                    timeframe TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    up_count INTEGER NOT NULL DEFAULT 0,
+                    down_count INTEGER NOT NULL DEFAULT 0,
+                    direction TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    trigger_count INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    source_rule TEXT NOT NULL,
+                    context_snapshot TEXT NOT NULL,
+                    triggers_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS archived_signals (
                     id TEXT PRIMARY KEY,
                     owner_user_id INTEGER,
@@ -141,6 +172,31 @@ class SqliteStore:
                     name TEXT NOT NULL,
                     direction TEXT NOT NULL,
                     message TEXT NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS archived_merged_signals (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id INTEGER,
+                    scope TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    symbol_name TEXT,
+                    timeframe TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    trade_date TEXT NOT NULL,
+                    up_count INTEGER NOT NULL DEFAULT 0,
+                    down_count INTEGER NOT NULL DEFAULT 0,
+                    direction TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    trigger_count INTEGER NOT NULL,
+                    message TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    source_rule TEXT NOT NULL,
+                    context_snapshot TEXT NOT NULL,
+                    triggers_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    archived_market_code TEXT NOT NULL,
+                    archived_trade_date TEXT NOT NULL,
                     archived_at TEXT NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS runtime_events (
@@ -215,10 +271,37 @@ class SqliteStore:
                     value_json TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS idx_signals_owner_ts
+                ON signals(owner_user_id, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_signals_symbol_ts
+                ON signals(symbol, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_signals_timeframe_ts
+                ON signals(timeframe, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_signal_triggers_signal_id
+                ON signal_triggers(signal_id);
+                CREATE INDEX IF NOT EXISTS idx_merged_signals_owner_trade_ts
+                ON merged_signals(owner_user_id, trade_date, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_merged_signals_symbol_trade_ts
+                ON merged_signals(symbol, trade_date, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_merged_signals_timeframe_trade_ts
+                ON merged_signals(timeframe, trade_date, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_archived_signals_owner_ts
+                ON archived_signals(owner_user_id, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_archived_signals_symbol_ts
+                ON archived_signals(symbol, ts DESC);
+                CREATE INDEX IF NOT EXISTS idx_archived_signal_triggers_signal_id
+                ON archived_signal_triggers(signal_id);
+                CREATE INDEX IF NOT EXISTS idx_archived_merged_signals_owner_trade_ts
+                ON archived_merged_signals(owner_user_id, trade_date, ts DESC);
                 """
             )
             self._ensure_column(conn, "users", "failed_login_attempts", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "users", "locked_until", "TEXT")
+            self._ensure_column(conn, "merged_signals", "up_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "merged_signals", "down_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "archived_merged_signals", "up_count", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "archived_merged_signals", "down_count", "INTEGER NOT NULL DEFAULT 0")
+        self._rebuild_merged_signals_if_needed()
 
     @staticmethod
     def _ensure_column(conn: sqlite3.Connection, table: str, column: str, definition: str) -> None:
@@ -735,6 +818,7 @@ class SqliteStore:
                     "INSERT INTO signal_triggers (signal_id, name, direction, message) VALUES (?, ?, ?, ?)",
                     (signal_id, trigger.name, trigger.direction, trigger.message),
                 )
+            self._refresh_merged_signal_for_group(conn, signal.owner_user_id, signal.symbol, signal.timeframe, signal.ts.isoformat())
         return signal_id
 
     def update_signal_context_snapshot(self, signal_id: str, context_snapshot: Dict[str, Any]) -> None:
@@ -743,6 +827,18 @@ class SqliteStore:
                 "UPDATE signals SET context_snapshot = ? WHERE id = ?",
                 (json.dumps(context_snapshot or {}, ensure_ascii=False), signal_id),
             )
+            row = conn.execute(
+                "SELECT owner_user_id, symbol, timeframe, ts FROM signals WHERE id = ?",
+                (signal_id,),
+            ).fetchone()
+            if row:
+                self._refresh_merged_signal_for_group(
+                    conn,
+                    int(row["owner_user_id"]) if row["owner_user_id"] is not None else None,
+                    str(row["symbol"]),
+                    str(row["timeframe"]),
+                    str(row["ts"]),
+                )
 
     def list_signals_raw(
         self,
@@ -753,6 +849,7 @@ class SqliteStore:
         symbol: Optional[str] = None,
         timeframe: Optional[str] = None,
         text: Optional[str] = None,
+        market_trade_dates: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         return self._list_signal_rows(
             table="signals",
@@ -764,6 +861,7 @@ class SqliteStore:
             symbol=symbol,
             timeframe=timeframe,
             text=text,
+            market_trade_dates=market_trade_dates,
         )
 
     def list_archived_signals_raw(
@@ -775,6 +873,7 @@ class SqliteStore:
         symbol: Optional[str] = None,
         timeframe: Optional[str] = None,
         text: Optional[str] = None,
+        market_trade_dates: Optional[Dict[str, str]] = None,
     ) -> List[Dict[str, Any]]:
         return self._list_signal_rows(
             table="archived_signals",
@@ -786,6 +885,28 @@ class SqliteStore:
             symbol=symbol,
             timeframe=timeframe,
             text=text,
+            market_trade_dates=market_trade_dates,
+        )
+
+    def list_archived_merged_signals(
+        self,
+        owner_user_id: Optional[int],
+        limit: int = 400,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        text: Optional[str] = None,
+        market_trade_dates: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        return self._list_merged_rows_page(
+            table="archived_merged_signals",
+            owner_user_id=owner_user_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            text=text,
+            market_trade_dates=market_trade_dates,
         )
 
     def _list_signal_rows(
@@ -799,6 +920,7 @@ class SqliteStore:
         symbol: Optional[str],
         timeframe: Optional[str],
         text: Optional[str],
+        market_trade_dates: Optional[Dict[str, str]],
     ) -> List[Dict[str, Any]]:
         clauses = []
         params: List[Any] = []
@@ -814,12 +936,22 @@ class SqliteStore:
             clauses.append("symbol = ?")
             params.append(symbol)
         if timeframe:
-            clauses.append("LOWER(timeframe) = ?")
+            clauses.append("timeframe = ?")
             params.append(timeframe.lower())
         if text:
             like = f"%{text}%"
             clauses.append("(message LIKE ? OR symbol LIKE ? OR COALESCE(symbol_name, '') LIKE ?)")
             params.extend([like, like, like])
+        if market_trade_dates:
+            market_clauses = []
+            for market_code, trade_date in market_trade_dates.items():
+                market_where = self._signal_market_where(str(market_code or "").upper())
+                if not market_where:
+                    continue
+                market_clauses.append(f"(({market_where}) AND substr(ts, 1, 10) = ?)")
+                params.append(trade_date)
+            if market_clauses:
+                clauses.append("(" + " OR ".join(market_clauses) + ")")
         where = " AND ".join(clauses) if clauses else "1 = 1"
         query = f"""
             SELECT *
@@ -832,10 +964,11 @@ class SqliteStore:
             params.extend([limit, offset])
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
+            row_items = [dict(row) for row in rows]
+            trigger_map = self._list_signal_triggers_map(conn, trigger_table, [item["id"] for item in row_items])
         items = []
-        for row in rows:
-            item = dict(row)
-            item["triggers"] = self._get_signal_triggers_from_table(trigger_table, item["id"])
+        for item in row_items:
+            item["triggers"] = trigger_map.get(item["id"], [])
             item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
             items.append(item)
         return items
@@ -851,14 +984,262 @@ class SqliteStore:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    @staticmethod
+    def _list_signal_triggers_map(
+        conn: sqlite3.Connection,
+        table: str,
+        signal_ids: List[str],
+    ) -> Dict[str, List[Dict[str, Any]]]:
+        if not signal_ids:
+            return {}
+        placeholders = ", ".join("?" for _ in signal_ids)
+        rows = conn.execute(
+            f"""
+            SELECT signal_id, name, direction, message
+            FROM {table}
+            WHERE signal_id IN ({placeholders})
+            ORDER BY id ASC
+            """,
+            signal_ids,
+        ).fetchall()
+        grouped: Dict[str, List[Dict[str, Any]]] = {}
+        for row in rows:
+            grouped.setdefault(str(row["signal_id"]), []).append(
+                {
+                    "name": row["name"],
+                    "direction": row["direction"],
+                    "message": row["message"],
+                }
+            )
+        return grouped
+
+    @staticmethod
+    def _merged_signal_id(owner_user_id: Optional[int], symbol: str, timeframe: str, ts: str) -> str:
+        owner_key = "global" if owner_user_id is None else str(owner_user_id)
+        return f"{owner_key}|{symbol}|{timeframe}|{ts}"
+
+    @staticmethod
+    def _resolve_exclusive_triggers(triggers: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        uniq: Dict[tuple, Dict[str, Any]] = {}
+        for trigger in triggers:
+            name = trigger.get("name")
+            direction = trigger.get("direction", "neutral")
+            if not name:
+                continue
+            key = (name, direction)
+            current = uniq.get(key)
+            if not current or str(trigger.get("ts", "")) >= str(current.get("ts", "")):
+                uniq[key] = trigger
+        return list(uniq.values())
+
+    def _normalize_signal_triggers(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        base_ts = item.get("ts", "")
+        out: Dict[str, Dict[str, Any]] = {}
+        for trigger in item.get("triggers") or []:
+            name = trigger.get("name")
+            if not name:
+                continue
+            out[name] = {
+                "name": name,
+                "direction": trigger.get("direction", "neutral"),
+                "ts": base_ts,
+            }
+        rule_name = item.get("rule_name")
+        if rule_name and rule_name not in out:
+            out[rule_name] = {
+                "name": rule_name,
+                "direction": item.get("direction") or "neutral",
+                "ts": base_ts,
+            }
+        return self._resolve_exclusive_triggers(list(out.values()))
+
+    @staticmethod
+    def _fallback_signal_trigger(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        direction = item.get("direction")
+        rule_name = item.get("rule_name") or item.get("source_rule")
+        if direction not in {"up", "down"} or not rule_name:
+            return []
+        return [{"name": rule_name, "direction": direction, "ts": item.get("ts", "")}]
+
+    def _merge_trigger_lists(self, left: List[Dict[str, Any]], right: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        merged = self._resolve_exclusive_triggers((left or []) + (right or []))
+        uniq: Dict[tuple, Dict[str, Any]] = {}
+        for trigger in merged:
+            key = (trigger.get("name"), trigger.get("direction", "neutral"))
+            current = uniq.get(key)
+            if not current or str(trigger.get("ts", "")) >= str(current.get("ts", "")):
+                uniq[key] = trigger
+        return list(uniq.values())
+
+    def _direction_counts(self, triggers: List[Dict[str, Any]]) -> Dict[str, int]:
+        counts = {"up": 0, "down": 0}
+        for trigger in self._merge_trigger_lists([], triggers or []):
+            direction = trigger.get("direction")
+            if direction in counts:
+                counts[direction] += 1
+        return counts
+
+    @staticmethod
+    def _count_to_level(n: int) -> str:
+        return f"Lv{max(0, min(5, n))}" if n < 5 else "Lv5"
+
+    @staticmethod
+    def _merge_context_snapshot_values(left: Dict[str, Any], right: Dict[str, Any]) -> Dict[str, Any]:
+        merged = {**(left or {})}
+        right = right or {}
+        left_metrics = (left or {}).get("forward_metrics")
+        right_metrics = right.get("forward_metrics")
+        if right_metrics and (
+            not left_metrics
+            or (right_metrics.get("completed") and not left_metrics.get("completed"))
+            or (right_metrics.get("observed_bars", 0) >= left_metrics.get("observed_bars", 0))
+        ):
+            merged["forward_metrics"] = right_metrics
+        return merged
+
+    def _refresh_merged_signal_for_group(
+        self,
+        conn: sqlite3.Connection,
+        owner_user_id: Optional[int],
+        symbol: str,
+        timeframe: str,
+        ts: str,
+    ) -> None:
+        if owner_user_id is None:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM signals
+                WHERE owner_user_id IS NULL AND symbol = ? AND timeframe = ? AND ts = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (symbol, timeframe, ts),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM signals
+                WHERE owner_user_id = ? AND symbol = ? AND timeframe = ? AND ts = ?
+                ORDER BY created_at ASC, id ASC
+                """,
+                (owner_user_id, symbol, timeframe, ts),
+            ).fetchall()
+        merged_id = self._merged_signal_id(owner_user_id, symbol, timeframe, ts)
+        if not rows:
+            conn.execute("DELETE FROM merged_signals WHERE id = ?", (merged_id,))
+            return
+        signal_ids = [str(row["id"]) for row in rows]
+        trigger_map = self._list_signal_triggers_map(conn, "signal_triggers", signal_ids)
+        aggregated: Optional[Dict[str, Any]] = None
+        for row in rows:
+            item = dict(row)
+            item["triggers"] = trigger_map.get(item["id"], [])
+            item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
+            normalized = self._normalize_signal_triggers(item)
+            if not normalized:
+                normalized = self._fallback_signal_trigger(item)
+            if not aggregated:
+                aggregated = {
+                    **item,
+                    "id": merged_id,
+                    "triggers": [],
+                    "dominant_items": {},
+                }
+            aggregated["context_snapshot"] = self._merge_context_snapshot_values(
+                aggregated.get("context_snapshot") or {},
+                item.get("context_snapshot") or {},
+            )
+            aggregated["triggers"] = self._merge_trigger_lists(aggregated.get("triggers") or [], normalized)
+            item_strengths = self._direction_counts(normalized)
+            for direction in ("up", "down"):
+                if item_strengths[direction] <= 0:
+                    continue
+                current = aggregated["dominant_items"].get(direction)
+                if not current or item_strengths[direction] >= current["strength"]:
+                    aggregated["dominant_items"][direction] = {
+                        "strength": item_strengths[direction],
+                        "message": item.get("message"),
+                        "rule_name": item.get("rule_name") or item.get("source_rule"),
+                        "source_rule": item.get("source_rule") or item.get("rule_name"),
+                        "created_at": item.get("created_at"),
+                    }
+        counts = self._direction_counts((aggregated or {}).get("triggers") or [])
+        is_balanced = counts["up"] == counts["down"]
+        direction = "neutral" if is_balanced else ("up" if counts["up"] > counts["down"] else "down")
+        trigger_count = abs(counts["up"] - counts["down"])
+        dominant = (aggregated or {}).get("dominant_items", {}).get(direction, {})
+        all_triggers = (aggregated or {}).get("triggers") or []
+        trade_date = str(ts)[:10]
+        now = _utc_now()
+        conn.execute(
+            """
+            INSERT INTO merged_signals
+            (id, owner_user_id, scope, symbol, symbol_name, timeframe, ts, trade_date, up_count, down_count, direction, level,
+             trigger_count, message, rule_name, source_rule, context_snapshot, triggers_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                scope = excluded.scope,
+                symbol_name = excluded.symbol_name,
+                trade_date = excluded.trade_date,
+                up_count = excluded.up_count,
+                down_count = excluded.down_count,
+                direction = excluded.direction,
+                level = excluded.level,
+                trigger_count = excluded.trigger_count,
+                message = excluded.message,
+                rule_name = excluded.rule_name,
+                source_rule = excluded.source_rule,
+                context_snapshot = excluded.context_snapshot,
+                triggers_json = excluded.triggers_json,
+                updated_at = excluded.updated_at
+            """,
+            (
+                merged_id,
+                owner_user_id,
+                aggregated.get("scope") or ("global" if owner_user_id is None else "user"),
+                symbol,
+                aggregated.get("symbol_name"),
+                timeframe,
+                ts,
+                trade_date,
+                counts["up"],
+                counts["down"],
+                direction,
+                self._count_to_level(trigger_count),
+                trigger_count,
+                dominant.get("message") or aggregated.get("message") or "",
+                dominant.get("rule_name") or aggregated.get("rule_name") or aggregated.get("source_rule") or "",
+                dominant.get("source_rule") or aggregated.get("source_rule") or aggregated.get("rule_name") or "",
+                json.dumps(aggregated.get("context_snapshot") or {}, ensure_ascii=False),
+                json.dumps(all_triggers, ensure_ascii=False),
+                aggregated.get("created_at") or now,
+                now,
+            ),
+        )
+
     def get_signal(self, signal_id: str) -> Optional[Dict[str, Any]]:
         with self._connect() as conn:
             row = conn.execute("SELECT * FROM signals WHERE id = ?", (signal_id,)).fetchone()
         if not row:
+            merged = self.get_merged_signal(signal_id)
+            if merged:
+                return merged
             return None
         item = dict(row)
         item["triggers"] = self.get_signal_triggers(signal_id)
         item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
+        return item
+
+    def get_merged_signal(self, signal_id: str) -> Optional[Dict[str, Any]]:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM merged_signals WHERE id = ?", (signal_id,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
+        item["triggers"] = json.loads(item.pop("triggers_json") or "[]")
+        item["evaluation"] = item["context_snapshot"].get("forward_metrics")
         return item
 
     def purge_signals_before_trade_date(self, market_code: str, trade_date: str) -> int:
@@ -868,6 +1249,61 @@ class SqliteStore:
             return 0
         archived_at = _utc_now()
         with self._connect() as conn:
+            merged_rows = conn.execute(
+                f"""
+                SELECT *
+                FROM merged_signals
+                WHERE trade_date < ?
+                  AND ({where})
+                """,
+                (trade_date,),
+            ).fetchall()
+            if merged_rows:
+                conn.executemany(
+                    """
+                    INSERT OR REPLACE INTO archived_merged_signals
+                    (id, owner_user_id, scope, symbol, symbol_name, timeframe, ts, trade_date, up_count, down_count, direction, level,
+                     trigger_count, message, rule_name, source_rule, context_snapshot, triggers_json,
+                     created_at, updated_at, archived_market_code, archived_trade_date, archived_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            row["id"],
+                            row["owner_user_id"],
+                            row["scope"],
+                            row["symbol"],
+                            row["symbol_name"],
+                            row["timeframe"],
+                            row["ts"],
+                            row["trade_date"],
+                            row["up_count"],
+                            row["down_count"],
+                            row["direction"],
+                            row["level"],
+                            row["trigger_count"],
+                            row["message"],
+                            row["rule_name"],
+                            row["source_rule"],
+                            row["context_snapshot"],
+                            row["triggers_json"],
+                            row["created_at"],
+                            row["updated_at"],
+                            market,
+                            trade_date,
+                            archived_at,
+                        )
+                        for row in merged_rows
+                    ],
+                )
+            conn.execute(
+                f"""
+                DELETE FROM merged_signals
+                WHERE trade_date < ?
+                  AND ({where})
+                """,
+                (trade_date,),
+            )
             rows = conn.execute(
                 f"""
                 SELECT *
@@ -880,67 +1316,8 @@ class SqliteStore:
             if not rows:
                 return 0
             signal_rows = [dict(row) for row in rows]
-            conn.executemany(
-                """
-                INSERT OR REPLACE INTO archived_signals
-                (id, owner_user_id, scope, symbol, symbol_name, timeframe, ts, source_rule, rule_name,
-                 message, strength, direction, dedupe_key, context_snapshot, created_at,
-                 archived_market_code, archived_trade_date, archived_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                [
-                    (
-                        row["id"],
-                        row["owner_user_id"],
-                        row["scope"],
-                        row["symbol"],
-                        row["symbol_name"],
-                        row["timeframe"],
-                        row["ts"],
-                        row["source_rule"],
-                        row["rule_name"],
-                        row["message"],
-                        row["strength"],
-                        row["direction"],
-                        row["dedupe_key"],
-                        row["context_snapshot"],
-                        row["created_at"],
-                        market,
-                        trade_date,
-                        archived_at,
-                    )
-                    for row in signal_rows
-                ],
-            )
             signal_ids = [str(row["id"]) for row in signal_rows]
             placeholders = ", ".join("?" for _ in signal_ids)
-            trigger_rows = conn.execute(
-                f"""
-                SELECT signal_id, name, direction, message
-                FROM signal_triggers
-                WHERE signal_id IN ({placeholders})
-                ORDER BY id ASC
-                """,
-                signal_ids,
-            ).fetchall()
-            if trigger_rows:
-                conn.executemany(
-                    """
-                    INSERT INTO archived_signal_triggers
-                    (signal_id, name, direction, message, archived_at)
-                    VALUES (?, ?, ?, ?, ?)
-                    """,
-                    [
-                        (
-                            row["signal_id"],
-                            row["name"],
-                            row["direction"],
-                            row["message"],
-                            archived_at,
-                        )
-                        for row in trigger_rows
-                    ],
-                )
             conn.execute(
                 f"DELETE FROM signals WHERE id IN ({placeholders})",
                 signal_ids,
@@ -994,6 +1371,157 @@ class SqliteStore:
                 """,
                 (signal_id, owner_user_id, channel, status, error_text, _utc_now()),
             )
+
+    def list_merged_signals(
+        self,
+        owner_user_id: Optional[int],
+        limit: Optional[int],
+        offset: int,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        text: Optional[str] = None,
+        market_trade_dates: Optional[Dict[str, str]] = None,
+        ) -> Dict[str, Any]:
+        return self._list_merged_rows_page(
+            table="merged_signals",
+            owner_user_id=owner_user_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            text=text,
+            market_trade_dates=market_trade_dates,
+        )
+
+    def _list_merged_rows_page(
+        self,
+        table: str,
+        owner_user_id: Optional[int],
+        limit: Optional[int],
+        offset: int,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        text: Optional[str] = None,
+        market_trade_dates: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        clauses = []
+        params: List[Any] = []
+        if owner_user_id is None:
+            clauses.append("owner_user_id IS NULL")
+        else:
+            clauses.append("(owner_user_id = ? OR owner_user_id IS NULL)")
+            params.append(owner_user_id)
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if timeframe:
+            clauses.append("timeframe = ?")
+            params.append(timeframe.lower())
+        if text:
+            like = f"%{text}%"
+            clauses.append("(message LIKE ? OR symbol LIKE ? OR COALESCE(symbol_name, '') LIKE ? OR triggers_json LIKE ?)")
+            params.extend([like, like, like, like])
+        if market_trade_dates:
+            market_clauses = []
+            for market_code, trade_date in market_trade_dates.items():
+                market_where = self._signal_market_where(str(market_code or "").upper())
+                if not market_where:
+                    continue
+                market_clauses.append(f"(({market_where}) AND trade_date = ?)")
+                params.append(trade_date)
+            if market_clauses:
+                clauses.append("(" + " OR ".join(market_clauses) + ")")
+        where = " AND ".join(clauses) if clauses else "1 = 1"
+        with self._connect() as conn:
+            total = conn.execute(
+                f"""
+                SELECT COUNT(*) AS c
+                FROM (
+                    SELECT 1
+                    FROM {table}
+                    WHERE {where}
+                    GROUP BY symbol, timeframe, ts
+                    HAVING SUM(up_count) != SUM(down_count)
+                )
+                """,
+                params,
+            ).fetchone()["c"]
+            if limit is None:
+                rows = conn.execute(
+                    f"""
+                    SELECT *
+                    FROM {table}
+                    WHERE {where}
+                    ORDER BY ts DESC, id DESC
+                    """,
+                    params,
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    f"""
+                    WITH filtered AS (
+                        SELECT *
+                        FROM {table}
+                        WHERE {where}
+                    ),
+                    page_keys AS (
+                        SELECT symbol, timeframe, ts, MAX(id) AS sort_id
+                        FROM filtered
+                        GROUP BY symbol, timeframe, ts
+                        HAVING SUM(up_count) != SUM(down_count)
+                        ORDER BY ts DESC, sort_id DESC
+                        LIMIT ? OFFSET ?
+                    )
+                    SELECT filtered.*
+                    FROM filtered
+                    JOIN page_keys
+                      ON filtered.symbol = page_keys.symbol
+                     AND filtered.timeframe = page_keys.timeframe
+                     AND filtered.ts = page_keys.ts
+                    ORDER BY filtered.ts DESC, filtered.id DESC
+                    """,
+                    params + [limit, offset],
+                ).fetchall()
+        items = []
+        for row in rows:
+            item = dict(row)
+            item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
+            item["triggers"] = json.loads(item.pop("triggers_json") or "[]")
+            item["evaluation"] = item["context_snapshot"].get("forward_metrics")
+            items.append(item)
+        return {
+            "items": items,
+            "total": int(total or 0),
+            "limit": limit,
+            "offset": offset,
+            "has_more": False if limit is None else offset + limit < int(total or 0),
+        }
+
+    def rebuild_merged_signals(self) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM merged_signals")
+            groups = conn.execute(
+                """
+                SELECT owner_user_id, symbol, timeframe, ts
+                FROM signals
+                GROUP BY owner_user_id, symbol, timeframe, ts
+                """
+            ).fetchall()
+            for row in groups:
+                self._refresh_merged_signal_for_group(
+                    conn,
+                    int(row["owner_user_id"]) if row["owner_user_id"] is not None else None,
+                    str(row["symbol"]),
+                    str(row["timeframe"]),
+                    str(row["ts"]),
+                )
+
+    def _rebuild_merged_signals_if_needed(self) -> None:
+        with self._connect() as conn:
+            signals_count = int(conn.execute("SELECT COUNT(*) AS c FROM signals").fetchone()["c"])
+            merged_count = int(conn.execute("SELECT COUNT(*) AS c FROM merged_signals").fetchone()["c"])
+        if signals_count > 0 and merged_count == 0:
+            self.rebuild_merged_signals()
 
     def create_rule_template(self, name: str, description: str, config: Dict[str, Any], created_by_user_id: Optional[int], is_system: bool = False) -> int:
         now = _utc_now()

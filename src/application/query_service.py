@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from .market_profile import market_effective_trade_date, market_timezone
+from .market_profile import detect_market_code, market_effective_trade_date, market_timezone
 from ..infrastructure import SqliteStore
 
 
@@ -48,6 +48,94 @@ class SignalQueryService:
         text: Optional[str] = None,
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
+        return self.list_signals_page_materialized(
+            owner_user_id=owner_user_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            level_1m=level_1m,
+            level_5m=level_5m,
+            text=text,
+            now=now,
+        )
+
+    def list_signals_page_materialized(
+        self,
+        owner_user_id: Optional[int],
+        limit: int = 100,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        level_1m: Optional[str] = None,
+        level_5m: Optional[str] = None,
+        text: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        market_trade_dates = self._market_trade_dates(symbol=symbol, now=now)
+        page_limit = max(1, int(limit or 100))
+        page_offset = max(0, int(offset or 0))
+        if level_1m or level_5m:
+            all_rows = self.store.list_merged_signals(
+                owner_user_id=owner_user_id,
+                limit=None,
+                offset=0,
+                symbol=symbol,
+                timeframe=timeframe,
+                text=text,
+                market_trade_dates=market_trade_dates,
+            )
+            items = self._merge_signals(all_rows["items"], owner_user_id)
+            items.sort(key=lambda item: (str(item.get("ts", "")), str(item.get("id", ""))), reverse=True)
+            if level_1m:
+                target = self._level_rank(level_1m)
+                items = [
+                    item for item in items
+                    if self._normalize_tf(item.get("timeframe")) != "1m" or self._level_rank(item.get("level")) >= target
+                ]
+            if level_5m:
+                target = self._level_rank(level_5m)
+                items = [
+                    item for item in items
+                    if self._normalize_tf(item.get("timeframe")) != "5m" or self._level_rank(item.get("level")) >= target
+                ]
+            total = len(items)
+            return {
+                "items": items[page_offset:page_offset + page_limit],
+                "total": total,
+                "limit": page_limit,
+                "offset": page_offset,
+                "has_more": page_offset + page_limit < total,
+            }
+        page = self.store.list_merged_signals(
+            owner_user_id=owner_user_id,
+            limit=page_limit,
+            offset=page_offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            text=text,
+            market_trade_dates=market_trade_dates,
+        )
+        items = self._merge_signals(page["items"], owner_user_id)
+        items.sort(key=lambda item: (str(item.get("ts", "")), str(item.get("id", ""))), reverse=True)
+        return {
+            **page,
+            "items": items,
+        }
+
+    def list_signals_page_legacy(
+        self,
+        owner_user_id: Optional[int],
+        limit: int = 100,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        level_1m: Optional[str] = None,
+        level_5m: Optional[str] = None,
+        text: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
+        market_trade_dates = self._market_trade_dates(symbol=symbol, now=now)
         raw = self.store.list_signals_raw(
             owner_user_id=owner_user_id,
             include_global=True,
@@ -56,16 +144,16 @@ class SignalQueryService:
             symbol=symbol,
             timeframe=timeframe,
             text=text,
+            market_trade_dates=market_trade_dates,
         )
         items = self._merge_signals(raw, owner_user_id)
-        items = self._filter_to_effective_trade_day(items, now)
         if level_1m:
             target = self._level_rank(level_1m)
             items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "1m" or self._level_rank(item.get("level")) >= target]
         if level_5m:
             target = self._level_rank(level_5m)
             items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "5m" or self._level_rank(item.get("level")) >= target]
-        items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
+        items.sort(key=lambda item: (str(item.get("ts", "")), str(item.get("id", ""))), reverse=True)
         total = len(items)
         page_size = max(1, int(limit or 100))
         page_offset = max(0, int(offset or 0))
@@ -75,6 +163,20 @@ class SignalQueryService:
             "limit": page_size,
             "offset": page_offset,
             "has_more": page_offset + page_size < total,
+        }
+
+    def _market_trade_dates(self, symbol: Optional[str], now: Optional[datetime]) -> Dict[str, str]:
+        if symbol:
+            market_code = detect_market_code(symbol)
+            return {market_code: market_effective_trade_date(symbol, "Asia/Hong_Kong", now=now)}
+        sample_symbols = {
+            "HK": "HK.00700",
+            "US": "US.NVDA",
+            "CN": "SH.600519",
+        }
+        return {
+            market_code: market_effective_trade_date(sample_symbol, "Asia/Hong_Kong", now=now)
+            for market_code, sample_symbol in sample_symbols.items()
         }
 
     def _merge_signals(self, raw: List[Dict], owner_user_id: Optional[int]) -> List[Dict]:
@@ -264,14 +366,3 @@ class SignalQueryService:
         ):
             merged["forward_metrics"] = right_metrics
         return merged
-
-    def _filter_to_effective_trade_day(self, items: List[Dict], now: Optional[datetime]) -> List[Dict]:
-        filtered = []
-        for item in items:
-            symbol = item.get("symbol")
-            tz_name = market_timezone(symbol, "Asia/Hong_Kong")
-            signal_trade_date = self._trade_date(str(item.get("ts", "")), tz_name)
-            effective_trade_date = market_effective_trade_date(symbol, "Asia/Hong_Kong", now=now)
-            if signal_trade_date == effective_trade_date:
-                filtered.append(item)
-        return filtered

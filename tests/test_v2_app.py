@@ -602,14 +602,18 @@ class V2AppTests(unittest.TestCase):
 
         remaining_hk = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="HK.00700")
         remaining_us = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
-        archived_hk = self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="HK.00700")
+        archived_hk = self.store.list_archived_merged_signals(owner_user_id=None, limit=50, symbol="HK.00700")
         self.assertEqual(len(remaining_hk), 1)
         self.assertEqual(remaining_hk[0]["message"], "new hk")
         self.assertEqual(len(remaining_us), 1)
         self.assertEqual(remaining_us[0]["message"], "old us")
-        self.assertEqual(len(archived_hk), 1)
-        self.assertEqual(archived_hk[0]["message"], "old hk")
-        self.assertEqual({trigger["name"] for trigger in archived_hk[0]["triggers"]}, {"rsi_oversold"})
+        self.assertEqual(len(archived_hk["items"]), 1)
+        self.assertEqual(archived_hk["items"][0]["message"], "old hk")
+        self.assertEqual({trigger["name"] for trigger in archived_hk["items"][0]["triggers"]}, {"rsi_oversold"})
+        self.assertEqual(
+            self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="HK.00700"),
+            [],
+        )
 
     def test_monitoring_clears_previous_trade_day_signals_after_market_open(self) -> None:
         old_us = Signal(
@@ -649,10 +653,14 @@ class V2AppTests(unittest.TestCase):
         monitoring.on_bar(bar)
 
         remaining_us = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
-        archived_us = self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
+        archived_us = self.store.list_archived_merged_signals(owner_user_id=None, limit=50, symbol="US.NVDA")
         self.assertEqual(remaining_us, [])
-        self.assertEqual(len(archived_us), 1)
-        self.assertEqual(archived_us[0]["message"], "old us")
+        self.assertEqual(len(archived_us["items"]), 1)
+        self.assertEqual(archived_us["items"][0]["message"], "old us")
+        self.assertEqual(
+            self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA"),
+            [],
+        )
 
     def test_signal_query_page_returns_total_and_offset(self) -> None:
         user_id = self.store.create_user("page-user", self.hasher.hash_password("pw"), "user")
@@ -687,6 +695,53 @@ class V2AppTests(unittest.TestCase):
         self.assertEqual(page["offset"], 2)
         self.assertTrue(page["has_more"])
         self.assertEqual(len(page["items"]), 2)
+
+    def test_signal_query_materialized_matches_legacy_with_level_filters(self) -> None:
+        user_id = self.store.create_user("page-filter-user", self.hasher.hash_password("pw"), "user")
+        bars = [
+            ("2026-03-16T09:30:00+08:00", ["rsi_oversold"]),
+            ("2026-03-16T09:31:00+08:00", ["rsi_oversold", "squeeze_breakout"]),
+            ("2026-03-16T09:32:00+08:00", ["vwap_deviation"]),
+            ("2026-03-16T09:33:00+08:00", ["break_retest", "prev_day_break"]),
+            ("2026-03-16T09:34:00+08:00", ["volume_price_divergence"]),
+        ]
+        for idx, (ts, rules) in enumerate(bars):
+            for rule in rules:
+                self.store.save_signal(
+                    Signal(
+                        symbol="HK.00700",
+                        symbol_name="腾讯控股",
+                        timeframe="1m",
+                        ts=datetime.fromisoformat(ts),
+                        rule=rule,
+                        message=f"{rule}-{idx}",
+                        direction="up",
+                        scope="global",
+                        owner_user_id=None,
+                        source_rule=rule,
+                        dedupe_key=f"{rule}-{idx}",
+                    ),
+                    [Trigger(name=rule, direction="up", message="")],
+                )
+
+        query = SignalQueryService(self.store)
+        kwargs = dict(
+            owner_user_id=user_id,
+            limit=1,
+            offset=1,
+            symbol="HK.00700",
+            timeframe="1m",
+            level_1m="Lv2",
+            now=datetime(2026, 3, 16, 11, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
+        legacy = query.list_signals_page_legacy(**kwargs)
+        materialized = query.list_signals_page_materialized(**kwargs)
+
+        self.assertEqual(legacy["total"], 2)
+        self.assertEqual(materialized["total"], legacy["total"])
+        self.assertEqual(materialized["offset"], legacy["offset"])
+        self.assertEqual(materialized["has_more"], legacy["has_more"])
+        self.assertEqual([item["id"] for item in materialized["items"]], [item["id"] for item in legacy["items"]])
 
     def test_monitoring_records_forward_metrics_for_new_signal(self) -> None:
         monitoring = MonitoringService(
