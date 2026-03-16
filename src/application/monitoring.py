@@ -41,12 +41,20 @@ class PendingSignalEvaluation:
     completed: bool = False
 
 
+@dataclass
+class WarmupResult:
+    active_symbols: List[str]
+    failed_symbols: List[Dict[str, str]]
+    total_bars: int = 0
+
+
 class MonitoringService:
     STATUS_EVENT_TYPES = [
         "runtime_started",
         "config_applied",
         "subscriptions_updated",
         "warmup_completed",
+        "warmup_symbol_failed",
         "config_apply_failed",
     ]
 
@@ -91,25 +99,30 @@ class MonitoringService:
             symbols = self.planner.active_symbols(profiles)
             with self._profiles_lock:
                 self._profiles = profiles
-            warmup_total = self._warmup(symbols)
+            warmup = self._warmup(symbols)
+            active_symbols = warmup.active_symbols
+            warmup_total = warmup.total_bars
             payload = {
-                "symbols": symbols,
-                "symbol_count": len(symbols),
+                "symbols": active_symbols,
+                "symbol_count": len(active_symbols),
                 "timeframes": self._timeframes,
                 "timeframe_count": len(self._timeframes),
                 "profiles_count": len(profiles),
                 "warmup_total_bars": warmup_total,
+                "requested_symbols": symbols,
+                "requested_symbol_count": len(symbols),
+                "failed_symbols": warmup.failed_symbols,
                 "startup": startup,
             }
             if startup:
-                self.gateway.start(symbols, self._timeframes, self.on_bar)
+                self.gateway.start(active_symbols, self._timeframes, self.on_bar)
             else:
-                self.gateway.apply_subscriptions(symbols, self._timeframes)
+                self.gateway.apply_subscriptions(active_symbols, self._timeframes)
             self._set_status(
                 started=True,
-                active_symbols=symbols,
+                active_symbols=active_symbols,
                 active_timeframes=self._timeframes,
-                subscriptions_count=len(symbols) * len(self._timeframes),
+                subscriptions_count=len(active_symbols) * len(self._timeframes),
                 profiles_count=len(profiles),
                 last_warmup_at=datetime.now(self._tz).isoformat(),
                 warmup_total_bars=warmup_total,
@@ -125,7 +138,7 @@ class MonitoringService:
             self.store.add_runtime_event(
                 "info",
                 "config_applied",
-                f"Applied runtime config for {len(symbols)} symbols.",
+                f"Applied runtime config for {len(active_symbols)} symbols.",
                 payload,
             )
             self.store.add_runtime_event(
@@ -207,48 +220,68 @@ class MonitoringService:
         default_rules = self.store.get_default_rule_config()
         return self.planner.build_profiles(default_rules, users, global_symbols, user_symbols_by_user, user_rule_overrides, notifications)
 
-    def _warmup(self, symbols: List[str]) -> int:
+    def _warmup(self, symbols: List[str]) -> WarmupResult:
         total = 0
+        active_symbols: List[str] = []
+        failed_symbols: List[Dict[str, str]] = []
         with self._profiles_lock:
             profiles = list(self._profiles)
         for symbol in symbols:
-            today = market_effective_trade_date(symbol, self._tz.key)
-            yesterday = market_previous_trading_date(symbol, self._tz.key, reference_date=datetime.fromisoformat(today).date())
-            prev_day = self.gateway.request_prev_day(symbol, yesterday)
-            if prev_day:
-                self._market_reference_days[symbol] = today
-                self._market_snapshots[symbol] = {
-                    "symbol": symbol,
-                    "trade_date": today,
-                    "prev_close": float(prev_day.get("close") or 0.0),
-                    "last_price": None,
-                    "change_pct": None,
-                    "last_ts": None,
-                    "timeframe": None,
-                }
-                for profile in profiles:
-                    if symbol in profile.symbols:
-                        profile.engine.store.set_prev_day(symbol, float(prev_day["high"]), float(prev_day["low"]))
-            for timeframe in self._timeframes:
-                for row in self.gateway.request_history(symbol, today, today, timeframe):
-                    ts = parse_time_key(row["time_key"])
-                    bar = Bar(
-                        symbol=row["code"],
-                        timeframe=timeframe,
-                        ts=normalize_market_datetime(row["code"], ts, self._tz.key),
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                        volume=float(row["volume"]),
-                    )
-                    if not market_trading_session(bar.symbol, bar.ts, self._tz.key):
-                        continue
-                    self._purge_old_market_signals(bar)
-                    self._track_bar(bar)
-                    self._process_bar(bar, emit=False)
-                    total += 1
-        return total
+            try:
+                today = market_effective_trade_date(symbol, self._tz.key)
+                yesterday = market_previous_trading_date(symbol, self._tz.key, reference_date=datetime.fromisoformat(today).date())
+                prev_day = self.gateway.request_prev_day(symbol, yesterday)
+                if prev_day:
+                    self._market_reference_days[symbol] = today
+                    self._market_snapshots[symbol] = {
+                        "symbol": symbol,
+                        "trade_date": today,
+                        "prev_close": float(prev_day.get("close") or 0.0),
+                        "last_price": None,
+                        "change_pct": None,
+                        "last_ts": None,
+                        "timeframe": None,
+                    }
+                    for profile in profiles:
+                        if symbol in profile.symbols:
+                            profile.engine.store.set_prev_day(symbol, float(prev_day["high"]), float(prev_day["low"]))
+                for timeframe in self._timeframes:
+                    for row in self.gateway.request_history(symbol, today, today, timeframe):
+                        ts = parse_time_key(row["time_key"])
+                        bar = Bar(
+                            symbol=row["code"],
+                            timeframe=timeframe,
+                            ts=normalize_market_datetime(row["code"], ts, self._tz.key),
+                            open=float(row["open"]),
+                            high=float(row["high"]),
+                            low=float(row["low"]),
+                            close=float(row["close"]),
+                            volume=float(row["volume"]),
+                        )
+                        if not market_trading_session(bar.symbol, bar.ts, self._tz.key):
+                            continue
+                        self._purge_old_market_signals(bar)
+                        self._track_bar(bar)
+                        self._process_bar(bar, emit=False)
+                        total += 1
+            except Exception as exc:
+                failed = {"symbol": symbol, "error": str(exc)}
+                failed_symbols.append(failed)
+                self.store.add_runtime_event(
+                    "error",
+                    "warmup_symbol_failed",
+                    f"Warmup skipped for {symbol}: {exc}",
+                    failed,
+                )
+                for timeframe in self._timeframes:
+                    key = f"{symbol}:{timeframe}"
+                    self._day_bars.pop(key, None)
+                    self._vwap_state.pop(key, None)
+                self._market_snapshots.pop(symbol, None)
+                self._market_reference_days.pop(symbol, None)
+                continue
+            active_symbols.append(symbol)
+        return WarmupResult(active_symbols=active_symbols, failed_symbols=failed_symbols, total_bars=total)
 
     def _process_bar(self, bar: Bar, emit: bool) -> None:
         with self._profiles_lock:
@@ -469,8 +502,8 @@ class MonitoringService:
             self.store.add_runtime_event(
                 "info",
                 "signals_pruned",
-                f"Purged {deleted} stale {market} signals before {trade_date}.",
-                {"market": market, "trade_date": trade_date, "deleted": deleted},
+                f"Archived {deleted} stale {market} signals before {trade_date}.",
+                {"market": market, "trade_date": trade_date, "archived": deleted},
             )
 
     def _ensure_market_reference(self, symbol: str, trade_date: str) -> None:

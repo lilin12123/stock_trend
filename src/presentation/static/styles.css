@@ -411,6 +411,26 @@ textarea {
   cursor: pointer;
 }
 
+.pager {
+  margin-top: 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.pager-actions {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.pager .mini-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+  transform: none;
+}
+
 .signal-card.active {
   border-color: rgba(204, 90, 43, 0.4);
   background: rgba(204, 90, 43, 0.08);

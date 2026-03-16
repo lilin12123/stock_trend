@@ -10,6 +10,12 @@ const state = {
   runtime: null,
   allSignals: [],
   signals: [],
+  signalPage: {
+    limit: 100,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+  },
   marketSnapshots: {},
   selectedSignalId: null,
   globalStocks: [],
@@ -107,6 +113,7 @@ const translations = {
     'monitor.indicatorsCount': '{count} 个同向指标',
     'monitor.currentPrice': '现价',
     'monitor.forwardMetrics': '{minutes}m后 最高 +{up}% · 最低 -{down}% · 收盘 {final}%',
+    'monitor.signalPageSummary': '第 {page} / {pages} 页 · 共 {total} 条',
     'monitor.noSignals': '暂无信号',
     'monitor.noChartData': '暂无图表数据',
     'monitor.noRuntimeEvents': '暂无运行事件',
@@ -161,6 +168,8 @@ const translations = {
     'common.cannotDisableSelf': '不能禁用当前登录的管理员账号',
     'common.role': '角色',
     'common.status': '状态',
+    'common.prev': '上一页',
+    'common.next': '下一页',
     'admin.createUser': '创建用户',
     'admin.usernamePlaceholder': '用户名',
     'admin.passwordPlaceholder': '初始密码',
@@ -250,6 +259,8 @@ const translations = {
     'events.config_applied.body': '股票 {symbols} 支 · 周期 {timeframes} 个 · 策略档案 {profiles} 份',
     'events.warmup_completed.title': '预热完成',
     'events.warmup_completed.body': '本次共预热 {bars} 根 K 线，用于初始化指标状态。',
+    'events.warmup_symbol_failed.title': '个股预热已跳过',
+    'events.warmup_symbol_failed.body': '{message}',
     'events.config_apply_failed.title': '配置应用失败',
     'events.config_apply_failed.opendLog': 'Futu SDK 无法写入本地日志目录，请检查 OpenD 日志目录权限。',
     'events.config_apply_failed.body': '{message}',
@@ -315,6 +326,7 @@ const translations = {
     'monitor.indicatorsCount': '{count} aligned indicators',
     'monitor.currentPrice': 'Now',
     'monitor.forwardMetrics': 'After {minutes}m high +{up}% · low -{down}% · close {final}%',
+    'monitor.signalPageSummary': 'Page {page} / {pages} · {total} total',
     'monitor.noSignals': 'No signals yet',
     'monitor.noChartData': 'No chart data yet',
     'monitor.noRuntimeEvents': 'No runtime events yet',
@@ -369,6 +381,8 @@ const translations = {
     'common.cannotDisableSelf': 'You cannot disable the current admin account',
     'common.role': 'Role',
     'common.status': 'Status',
+    'common.prev': 'Previous',
+    'common.next': 'Next',
     'admin.createUser': 'Create User',
     'admin.usernamePlaceholder': 'Username',
     'admin.passwordPlaceholder': 'Initial password',
@@ -458,6 +472,8 @@ const translations = {
     'events.config_applied.body': '{symbols} symbols · {timeframes} timeframes · {profiles} profiles',
     'events.warmup_completed.title': 'Warmup Completed',
     'events.warmup_completed.body': '{bars} bars were replayed to initialize indicator state.',
+    'events.warmup_symbol_failed.title': 'Symbol Warmup Skipped',
+    'events.warmup_symbol_failed.body': '{message}',
     'events.config_apply_failed.title': 'Configuration Apply Failed',
     'events.config_apply_failed.opendLog': 'The Futu SDK could not write its local log file. Please check the OpenD log directory permissions.',
     'events.config_apply_failed.body': '{message}',
@@ -785,9 +801,6 @@ function renderStocks() {
     backtestDate.value = beijing;
   }
 
-  if (state.me) {
-    applySignalFilters();
-  }
 }
 
 function renderRules() {
@@ -928,6 +941,26 @@ function renderSignals() {
   list.querySelectorAll('.signal-card').forEach(card => {
     card.addEventListener('click', () => selectSignal(card.dataset.signalId));
   });
+  renderSignalPager();
+}
+
+function renderSignalPager() {
+  const pager = document.getElementById('signalPager');
+  if (!pager) return;
+  const total = Number(state.signalPage?.total || 0);
+  const limit = Math.max(1, Number(state.signalPage?.limit || 100));
+  const offset = Math.max(0, Number(state.signalPage?.offset || 0));
+  const currentPage = total ? Math.floor(offset / limit) + 1 : 1;
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  pager.innerHTML = `
+    <span class="meta-line">${t('monitor.signalPageSummary', { page: currentPage, pages: totalPages, total })}</span>
+    <div class="pager-actions">
+      <button id="signalPrevPageBtn" class="mini-btn" type="button" ${offset <= 0 ? 'disabled' : ''}>${t('common.prev')}</button>
+      <button id="signalNextPageBtn" class="mini-btn" type="button" ${!state.signalPage?.hasMore ? 'disabled' : ''}>${t('common.next')}</button>
+    </div>
+  `;
+  document.getElementById('signalPrevPageBtn')?.addEventListener('click', () => changeSignalPage(-1));
+  document.getElementById('signalNextPageBtn')?.addEventListener('click', () => changeSignalPage(1));
 }
 
 function renderSignalPrice(signal) {
@@ -1387,37 +1420,35 @@ async function refreshConfig() {
   renderNotifications();
 }
 
-async function refreshSignals() {
-  const [signals, marketSnapshots] = await Promise.all([
-    fetchJSON('/api/signals?limit=200'),
-    fetchJSON('/api/market-snapshots'),
-  ]);
-  state.allSignals = signals;
-  state.marketSnapshots = marketSnapshots || {};
-  applySignalFilters();
-}
-
-function applySignalFilters() {
-  const text = document.getElementById('signalTextFilter')?.value.trim().toLowerCase() || '';
+function buildSignalQuery() {
+  const params = new URLSearchParams();
+  const text = document.getElementById('signalTextFilter')?.value.trim() || '';
   const symbol = document.getElementById('signalSymbolFilter')?.value || '';
   const tf = document.getElementById('signalTfFilter')?.value || '';
-  state.signals = (state.allSignals || []).filter(item => {
-    if (symbol && item.symbol !== symbol) return false;
-    if (tf && normalizeTf(item.timeframe) !== normalizeTf(tf)) return false;
-    if (!text) return true;
-    const haystack = [
-      item.symbol,
-      item.symbol_name,
-      item.message,
-      item.rule_name,
-      item.source_rule,
-      ...(item.triggers || []).map(trigger => trigger.name),
-    ]
-      .filter(Boolean)
-      .join(' ')
-      .toLowerCase();
-    return haystack.includes(text);
-  });
+  params.set('limit', String(state.signalPage.limit || 100));
+  params.set('offset', String(state.signalPage.offset || 0));
+  if (text) params.set('text', text);
+  if (symbol) params.set('symbol', symbol);
+  if (tf) params.set('tf', tf);
+  return params.toString();
+}
+
+async function refreshSignals(options = {}) {
+  if (options.resetOffset) {
+    state.signalPage.offset = 0;
+  }
+  const query = buildSignalQuery();
+  const [signalsPage, marketSnapshots] = await Promise.all([
+    fetchJSON(`/api/signals?${query}`),
+    fetchJSON('/api/market-snapshots'),
+  ]);
+  state.allSignals = signalsPage?.items || [];
+  state.signals = state.allSignals;
+  state.signalPage.total = Number(signalsPage?.total || 0);
+  state.signalPage.limit = Number(signalsPage?.limit || state.signalPage.limit || 100);
+  state.signalPage.offset = Number(signalsPage?.offset || 0);
+  state.signalPage.hasMore = Boolean(signalsPage?.has_more);
+  state.marketSnapshots = marketSnapshots || {};
   if (state.selectedSignalId && !state.signals.some(item => item.id === state.selectedSignalId)) {
     state.selectedSignalId = null;
   }
@@ -1427,6 +1458,18 @@ function applySignalFilters() {
     return;
   }
   drawChart();
+}
+
+function applySignalFilters() {
+  refreshSignals({ resetOffset: true });
+}
+
+function changeSignalPage(step) {
+  const limit = Math.max(1, Number(state.signalPage.limit || 100));
+  const nextOffset = Math.max(0, Number(state.signalPage.offset || 0) + (step * limit));
+  if (nextOffset === state.signalPage.offset) return;
+  state.signalPage.offset = nextOffset;
+  refreshSignals();
 }
 
 async function refreshChart(resetView = false) {

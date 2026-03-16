@@ -33,6 +33,8 @@ class FakeGateway:
         self.applied = []
         self.prev_day_requests = []
         self.history_requests = []
+        self.fail_history_symbols = set()
+        self.fail_prev_day_symbols = set()
 
     def start(self, symbols, timeframes, on_bar):
         self.started.append((list(symbols), list(timeframes)))
@@ -42,10 +44,14 @@ class FakeGateway:
 
     def request_prev_day(self, symbol, day):
         self.prev_day_requests.append((symbol, day))
+        if symbol in self.fail_prev_day_symbols:
+            raise RuntimeError(f"prev day failed for {symbol}")
         return None
 
     def request_history(self, symbol, start, end, timeframe):
         self.history_requests.append((symbol, start, end, timeframe))
+        if symbol in self.fail_history_symbols:
+            raise RuntimeError(f"request_history_kline failed: no permission for {symbol}")
         return []
 
     def close(self):
@@ -245,7 +251,11 @@ class V2AppTests(unittest.TestCase):
         self.store.save_signal(second, [Trigger(name="open_range_breakout", direction="up", message="")])
 
         query = SignalQueryService(self.store)
-        items = query.list_signals(owner_user_id=user_id, limit=20)
+        items = query.list_signals(
+            owner_user_id=user_id,
+            limit=20,
+            now=datetime(2026, 3, 13, 11, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["level"], "Lv2")
         self.assertEqual(items[0]["direction"], "up")
@@ -269,9 +279,44 @@ class V2AppTests(unittest.TestCase):
         self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
 
         query = SignalQueryService(self.store)
-        items = query.list_signals(owner_user_id=user_id, limit=20, symbol="US.NVDA", timeframe="1m")
+        items = query.list_signals(
+            owner_user_id=user_id,
+            limit=20,
+            symbol="US.NVDA",
+            timeframe="1m",
+            now=datetime(2026, 3, 16, 8, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["message"], "carry overnight")
+
+    def test_signal_query_hides_previous_trade_day_after_market_open(self) -> None:
+        user_id = self.store.create_user("bob3", self.hasher.hash_password("pw"), "user")
+        self.store.save_signal(
+            Signal(
+                symbol="US.NVDA",
+                symbol_name="NVIDIA",
+                timeframe="1m",
+                ts=datetime.fromisoformat("2026-03-13T15:55:00-04:00"),
+                rule="rsi_oversold",
+                message="previous day",
+                direction="up",
+                scope="global",
+                owner_user_id=None,
+                source_rule="rsi_oversold",
+                dedupe_key="carry-us-hidden",
+            ),
+            [Trigger(name="rsi_oversold", direction="up", message="")],
+        )
+
+        query = SignalQueryService(self.store)
+        items = query.list_signals(
+            owner_user_id=user_id,
+            limit=20,
+            symbol="US.NVDA",
+            timeframe="1m",
+            now=datetime(2026, 3, 16, 10, 0, tzinfo=ZoneInfo("America/New_York")),
+        )
+        self.assertEqual(items, [])
 
     def test_signal_query_returns_completed_forward_metrics(self) -> None:
         user_id = self.store.create_user("metrics", self.hasher.hash_password("pw"), "user")
@@ -302,7 +347,11 @@ class V2AppTests(unittest.TestCase):
         )
         self.store.save_signal(signal, [Trigger(name="rsi_oversold", direction="up", message="")])
 
-        items = SignalQueryService(self.store).list_signals(owner_user_id=user_id, limit=20)
+        items = SignalQueryService(self.store).list_signals(
+            owner_user_id=user_id,
+            limit=20,
+            now=datetime(2026, 3, 13, 11, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
         self.assertEqual(len(items), 1)
         self.assertEqual(items[0]["evaluation"]["horizon_minutes"], 20)
         self.assertAlmostEqual(items[0]["evaluation"]["max_up"], 3.2)
@@ -420,6 +469,32 @@ class V2AppTests(unittest.TestCase):
         self.assertIn("HK.00700", status.active_symbols)
         self.assertEqual(len(gateway.started), 1)
 
+    def test_monitoring_apply_config_skips_symbols_that_fail_warmup(self) -> None:
+        gateway = FakeGateway()
+        gateway.fail_history_symbols.add("US.NVDA")
+        self.store.add_global_symbol("US.NVDA", "NVIDIA", True)
+        monitoring = MonitoringService(
+            store=self.store,
+            gateway=gateway,
+            dispatcher=FakeDispatcher(),
+            planner=SubscriptionPlanner(),
+            app_cfg=self.cfg["app"],
+        )
+
+        monitoring.start()
+
+        status = monitoring.get_status()
+        self.assertTrue(status.started)
+        self.assertIn("HK.00700", status.active_symbols)
+        self.assertIn("HK.00981", status.active_symbols)
+        self.assertNotIn("US.NVDA", status.active_symbols)
+        self.assertEqual(len(gateway.started), 1)
+        self.assertNotIn("US.NVDA", gateway.started[0][0])
+        events = self.store.list_runtime_events(20)
+        warmup_failures = [item for item in events if item["event_type"] == "warmup_symbol_failed"]
+        self.assertTrue(warmup_failures)
+        self.assertIn("US.NVDA", warmup_failures[0]["message"])
+
     def test_market_profiles_cover_us_and_cn(self) -> None:
         us_profile = get_market_profile("US.NVDA")
         cn_profile = get_market_profile("SH.600519")
@@ -505,10 +580,14 @@ class V2AppTests(unittest.TestCase):
 
         remaining_hk = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="HK.00700")
         remaining_us = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
+        archived_hk = self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="HK.00700")
         self.assertEqual(len(remaining_hk), 1)
         self.assertEqual(remaining_hk[0]["message"], "new hk")
         self.assertEqual(len(remaining_us), 1)
         self.assertEqual(remaining_us[0]["message"], "old us")
+        self.assertEqual(len(archived_hk), 1)
+        self.assertEqual(archived_hk[0]["message"], "old hk")
+        self.assertEqual({trigger["name"] for trigger in archived_hk[0]["triggers"]}, {"rsi_oversold"})
 
     def test_monitoring_clears_previous_trade_day_signals_after_market_open(self) -> None:
         old_us = Signal(
@@ -548,7 +627,44 @@ class V2AppTests(unittest.TestCase):
         monitoring.on_bar(bar)
 
         remaining_us = self.store.list_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
+        archived_us = self.store.list_archived_signals_raw(owner_user_id=None, include_global=True, limit=50, symbol="US.NVDA")
         self.assertEqual(remaining_us, [])
+        self.assertEqual(len(archived_us), 1)
+        self.assertEqual(archived_us[0]["message"], "old us")
+
+    def test_signal_query_page_returns_total_and_offset(self) -> None:
+        user_id = self.store.create_user("page-user", self.hasher.hash_password("pw"), "user")
+        for idx in range(5):
+            self.store.save_signal(
+                Signal(
+                    symbol="HK.00700",
+                    symbol_name="腾讯控股",
+                    timeframe="1m",
+                    ts=datetime.fromisoformat(f"2026-03-16T09:{30 + idx:02d}:00+08:00"),
+                    rule="rsi_oversold",
+                    message=f"signal-{idx}",
+                    direction="up",
+                    scope="global",
+                    owner_user_id=None,
+                    source_rule="rsi_oversold",
+                    dedupe_key=f"page-{idx}",
+                ),
+                [Trigger(name="rsi_oversold", direction="up", message="")],
+            )
+
+        page = SignalQueryService(self.store).list_signals_page(
+            owner_user_id=user_id,
+            limit=2,
+            offset=2,
+            symbol="HK.00700",
+            timeframe="1m",
+            now=datetime(2026, 3, 16, 11, 0, tzinfo=ZoneInfo("Asia/Hong_Kong")),
+        )
+        self.assertEqual(page["total"], 5)
+        self.assertEqual(page["limit"], 2)
+        self.assertEqual(page["offset"], 2)
+        self.assertTrue(page["has_more"])
+        self.assertEqual(len(page["items"]), 2)
 
     def test_monitoring_records_forward_metrics_for_new_signal(self) -> None:
         monitoring = MonitoringService(

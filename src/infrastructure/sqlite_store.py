@@ -115,6 +115,34 @@ class SqliteStore:
                     message TEXT NOT NULL,
                     FOREIGN KEY(signal_id) REFERENCES signals(id) ON DELETE CASCADE
                 );
+                CREATE TABLE IF NOT EXISTS archived_signals (
+                    id TEXT PRIMARY KEY,
+                    owner_user_id INTEGER,
+                    scope TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    symbol_name TEXT,
+                    timeframe TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    source_rule TEXT NOT NULL,
+                    rule_name TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    strength REAL,
+                    direction TEXT,
+                    dedupe_key TEXT NOT NULL,
+                    context_snapshot TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    archived_market_code TEXT NOT NULL,
+                    archived_trade_date TEXT NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS archived_signal_triggers (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    signal_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    direction TEXT NOT NULL,
+                    message TEXT NOT NULL,
+                    archived_at TEXT NOT NULL
+                );
                 CREATE TABLE IF NOT EXISTS runtime_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     level TEXT NOT NULL,
@@ -720,11 +748,57 @@ class SqliteStore:
         self,
         owner_user_id: Optional[int],
         include_global: bool = True,
-        limit: int = 400,
+        limit: Optional[int] = 400,
         offset: int = 0,
         symbol: Optional[str] = None,
         timeframe: Optional[str] = None,
         text: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self._list_signal_rows(
+            table="signals",
+            trigger_table="signal_triggers",
+            owner_user_id=owner_user_id,
+            include_global=include_global,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            text=text,
+        )
+
+    def list_archived_signals_raw(
+        self,
+        owner_user_id: Optional[int],
+        include_global: bool = True,
+        limit: Optional[int] = 400,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        text: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self._list_signal_rows(
+            table="archived_signals",
+            trigger_table="archived_signal_triggers",
+            owner_user_id=owner_user_id,
+            include_global=include_global,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            text=text,
+        )
+
+    def _list_signal_rows(
+        self,
+        table: str,
+        trigger_table: str,
+        owner_user_id: Optional[int],
+        include_global: bool,
+        limit: Optional[int],
+        offset: int,
+        symbol: Optional[str],
+        timeframe: Optional[str],
+        text: Optional[str],
     ) -> List[Dict[str, Any]]:
         clauses = []
         params: List[Any] = []
@@ -749,26 +823,30 @@ class SqliteStore:
         where = " AND ".join(clauses) if clauses else "1 = 1"
         query = f"""
             SELECT *
-            FROM signals
+            FROM {table}
             WHERE {where}
             ORDER BY ts DESC, id DESC
-            LIMIT ? OFFSET ?
         """
-        params.extend([limit, offset])
+        if limit is not None:
+            query += "\nLIMIT ? OFFSET ?"
+            params.extend([limit, offset])
         with self._connect() as conn:
             rows = conn.execute(query, params).fetchall()
         items = []
         for row in rows:
             item = dict(row)
-            item["triggers"] = self.get_signal_triggers(item["id"])
+            item["triggers"] = self._get_signal_triggers_from_table(trigger_table, item["id"])
             item["context_snapshot"] = json.loads(item["context_snapshot"] or "{}")
             items.append(item)
         return items
 
     def get_signal_triggers(self, signal_id: str) -> List[Dict[str, Any]]:
+        return self._get_signal_triggers_from_table("signal_triggers", signal_id)
+
+    def _get_signal_triggers_from_table(self, table: str, signal_id: str) -> List[Dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT name, direction, message FROM signal_triggers WHERE signal_id = ? ORDER BY id ASC",
+                f"SELECT name, direction, message FROM {table} WHERE signal_id = ? ORDER BY id ASC",
                 (signal_id,),
             ).fetchall()
         return [dict(row) for row in rows]
@@ -788,17 +866,86 @@ class SqliteStore:
         where = self._signal_market_where(market)
         if not where:
             return 0
+        archived_at = _utc_now()
         with self._connect() as conn:
-            cursor = conn.execute(
+            rows = conn.execute(
                 f"""
-                DELETE FROM signals
+                SELECT *
+                FROM signals
                 WHERE substr(ts, 1, 10) < ?
                   AND ({where})
                 """,
                 (trade_date,),
+            ).fetchall()
+            if not rows:
+                return 0
+            signal_rows = [dict(row) for row in rows]
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO archived_signals
+                (id, owner_user_id, scope, symbol, symbol_name, timeframe, ts, source_rule, rule_name,
+                 message, strength, direction, dedupe_key, context_snapshot, created_at,
+                 archived_market_code, archived_trade_date, archived_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        row["id"],
+                        row["owner_user_id"],
+                        row["scope"],
+                        row["symbol"],
+                        row["symbol_name"],
+                        row["timeframe"],
+                        row["ts"],
+                        row["source_rule"],
+                        row["rule_name"],
+                        row["message"],
+                        row["strength"],
+                        row["direction"],
+                        row["dedupe_key"],
+                        row["context_snapshot"],
+                        row["created_at"],
+                        market,
+                        trade_date,
+                        archived_at,
+                    )
+                    for row in signal_rows
+                ],
             )
-            deleted = cursor.rowcount if cursor.rowcount is not None else 0
-        return max(0, deleted)
+            signal_ids = [str(row["id"]) for row in signal_rows]
+            placeholders = ", ".join("?" for _ in signal_ids)
+            trigger_rows = conn.execute(
+                f"""
+                SELECT signal_id, name, direction, message
+                FROM signal_triggers
+                WHERE signal_id IN ({placeholders})
+                ORDER BY id ASC
+                """,
+                signal_ids,
+            ).fetchall()
+            if trigger_rows:
+                conn.executemany(
+                    """
+                    INSERT INTO archived_signal_triggers
+                    (signal_id, name, direction, message, archived_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    [
+                        (
+                            row["signal_id"],
+                            row["name"],
+                            row["direction"],
+                            row["message"],
+                            archived_at,
+                        )
+                        for row in trigger_rows
+                    ],
+                )
+            conn.execute(
+                f"DELETE FROM signals WHERE id IN ({placeholders})",
+                signal_ids,
+            )
+        return len(signal_rows)
 
     @staticmethod
     def _signal_market_where(market_code: str) -> str:

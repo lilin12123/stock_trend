@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from .market_profile import market_timezone
+from .market_profile import market_effective_trade_date, market_timezone
 from ..infrastructure import SqliteStore
 
 
@@ -22,16 +22,62 @@ class SignalQueryService:
         level_1m: Optional[str] = None,
         level_5m: Optional[str] = None,
         text: Optional[str] = None,
+        now: Optional[datetime] = None,
     ) -> List[Dict]:
+        return self.list_signals_page(
+            owner_user_id=owner_user_id,
+            limit=limit,
+            offset=offset,
+            symbol=symbol,
+            timeframe=timeframe,
+            level_1m=level_1m,
+            level_5m=level_5m,
+            text=text,
+            now=now,
+        )["items"]
+
+    def list_signals_page(
+        self,
+        owner_user_id: Optional[int],
+        limit: int = 100,
+        offset: int = 0,
+        symbol: Optional[str] = None,
+        timeframe: Optional[str] = None,
+        level_1m: Optional[str] = None,
+        level_5m: Optional[str] = None,
+        text: Optional[str] = None,
+        now: Optional[datetime] = None,
+    ) -> Dict[str, Any]:
         raw = self.store.list_signals_raw(
             owner_user_id=owner_user_id,
             include_global=True,
-            limit=max(limit * 4, 400),
+            limit=None,
             offset=0,
             symbol=symbol,
             timeframe=timeframe,
             text=text,
         )
+        items = self._merge_signals(raw, owner_user_id)
+        items = self._filter_to_effective_trade_day(items, now)
+        if level_1m:
+            target = self._level_rank(level_1m)
+            items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "1m" or self._level_rank(item.get("level")) >= target]
+        if level_5m:
+            target = self._level_rank(level_5m)
+            items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "5m" or self._level_rank(item.get("level")) >= target]
+        items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
+        total = len(items)
+        page_size = max(1, int(limit or 100))
+        page_offset = max(0, int(offset or 0))
+        return {
+            "items": items[page_offset:page_offset + page_size],
+            "total": total,
+            "limit": page_size,
+            "offset": page_offset,
+            "has_more": page_offset + page_size < total,
+        }
+
+    def _merge_signals(self, raw: List[Dict], owner_user_id: Optional[int]) -> List[Dict]:
         merged: Dict[str, Dict] = {}
         for item in raw:
             tz_name = market_timezone(item.get("symbol"), "Asia/Hong_Kong")
@@ -93,18 +139,23 @@ class SignalQueryService:
                     "created_at": dominant.get("created_at") or aggregated.get("created_at"),
                 }
             )
-        if level_1m:
-            target = self._level_rank(level_1m)
-            items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "1m" or self._level_rank(item.get("level")) >= target]
-        if level_5m:
-            target = self._level_rank(level_5m)
-            items = [item for item in items if self._normalize_tf(item.get("timeframe")) != "5m" or self._level_rank(item.get("level")) >= target]
-        items.sort(key=lambda item: str(item.get("ts", "")), reverse=True)
-        return items[offset:offset + limit]
+        return items
 
     @staticmethod
     def _normalize_tf(value: str | None) -> str:
         return str(value or "").strip().lower()
+
+    @staticmethod
+    def _trade_date(ts: str, tz_name: str) -> str:
+        try:
+            dt = datetime.fromisoformat(ts)
+        except ValueError:
+            return ts[:10]
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+        else:
+            dt = dt.astimezone(ZoneInfo(tz_name))
+        return dt.date().isoformat()
 
     @staticmethod
     def _bar_key(ts: str, tz_name: str) -> str:
@@ -213,3 +264,14 @@ class SignalQueryService:
         ):
             merged["forward_metrics"] = right_metrics
         return merged
+
+    def _filter_to_effective_trade_day(self, items: List[Dict], now: Optional[datetime]) -> List[Dict]:
+        filtered = []
+        for item in items:
+            symbol = item.get("symbol")
+            tz_name = market_timezone(symbol, "Asia/Hong_Kong")
+            signal_trade_date = self._trade_date(str(item.get("ts", "")), tz_name)
+            effective_trade_date = market_effective_trade_date(symbol, "Asia/Hong_Kong", now=now)
+            if signal_trade_date == effective_trade_date:
+                filtered.append(item)
+        return filtered

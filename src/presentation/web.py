@@ -151,9 +151,9 @@ class LocalWebApp:
                 return self._write_json(handler, self.monitoring_service.apply_config())
             if path == "/api/signals" and method == "GET":
                 params = parse_qs(parsed.query)
-                items = self.query_service.list_signals(
+                page = self.query_service.list_signals_page(
                     owner_user_id=int(user["id"]),
-                    limit=int(params.get("limit", ["200"])[0]),
+                    limit=int(params.get("limit", ["100"])[0]),
                     offset=int(params.get("offset", ["0"])[0]),
                     symbol=params.get("symbol", [None])[0],
                     timeframe=params.get("tf", [None])[0],
@@ -161,7 +161,7 @@ class LocalWebApp:
                     level_5m=params.get("level_5m", [None])[0],
                     text=params.get("text", [None])[0],
                 )
-                return self._write_json(handler, items)
+                return self._write_json(handler, page)
             if path == "/api/market-snapshots" and method == "GET":
                 return self._write_json(handler, self.monitoring_service.get_market_snapshots())
             if path.startswith("/api/signals/") and method == "GET":
