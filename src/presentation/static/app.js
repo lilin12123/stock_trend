@@ -8,6 +8,7 @@ const state = {
     limit_reached: false,
   },
   runtime: null,
+  allSignals: [],
   signals: [],
   selectedSignalId: null,
   globalStocks: [],
@@ -64,7 +65,7 @@ const translations = {
     'register.username': '用户名',
     'register.password': '密码',
     'register.submit': '注册',
-    'register.meta': '开放注册中，当前还可注册 {remaining} 个普通用户。',
+    'register.meta': '开放注册中，请填写用户名和密码创建普通用户。',
     'register.limitReached': '已达到普通用户注册上限 {max}，请联系管理员。',
     'register.disabled': '当前未开放自助注册，请联系管理员开通账号。',
     'register.watchlistHint': '每位用户当前最多只能维护 1 支自选股票。',
@@ -149,6 +150,7 @@ const translations = {
     'admin.passwordPlaceholder': '初始密码',
     'admin.createUserAction': '创建用户',
     'admin.userList': '用户列表',
+    'admin.registrationSummary': '普通用户上限 {max} · 已注册 {registered} · 剩余 {remaining}',
     'admin.noUsers': '暂无用户',
     'admin.resetPassword': '修改密码',
     'admin.newPassword': '新密码',
@@ -261,7 +263,7 @@ const translations = {
     'register.username': 'Username',
     'register.password': 'Password',
     'register.submit': 'Create Account',
-    'register.meta': 'Self-registration is open. {remaining} user slots remaining.',
+    'register.meta': 'Self-registration is open. Fill in a username and password to create a user account.',
     'register.limitReached': 'The user registration limit of {max} has been reached. Please contact the admin.',
     'register.disabled': 'Self-registration is currently disabled. Please contact the admin.',
     'register.watchlistHint': 'Each user can keep only one personal watchlist symbol for now.',
@@ -346,6 +348,7 @@ const translations = {
     'admin.passwordPlaceholder': 'Initial password',
     'admin.createUserAction': 'Create User',
     'admin.userList': 'User List',
+    'admin.registrationSummary': 'User limit {max} · registered {registered} · remaining {remaining}',
     'admin.noUsers': 'No users yet',
     'admin.resetPassword': 'Reset Password',
     'admin.newPassword': 'New password',
@@ -639,7 +642,7 @@ function renderRegistrationCard() {
   } else if (limitReached) {
     meta.textContent = t('register.limitReached', { max: registration.max_users ?? 0 });
   } else {
-    meta.textContent = t('register.meta', { remaining: registration.remaining_slots ?? 0 });
+    meta.textContent = t('register.meta');
   }
   form.querySelectorAll('input, button').forEach(node => {
     if (node.id === 'langZhBtn' || node.id === 'langEnBtn') return;
@@ -743,6 +746,10 @@ function renderStocks() {
     }).format(now);
     backtestDate.value = beijing;
   }
+
+  if (state.me) {
+    applySignalFilters();
+  }
 }
 
 function renderRules() {
@@ -782,8 +789,17 @@ function syncNotificationForm() {
 
 function renderUsers() {
   const box = document.getElementById('userList');
+  const registrationSummary = document.getElementById('adminRegistrationSummary');
   if (!box) return;
   const users = state.users || [];
+  const registration = state.registration || {};
+  if (registrationSummary) {
+    registrationSummary.textContent = t('admin.registrationSummary', {
+      max: registration.max_users ?? 0,
+      registered: registration.registered_users ?? 0,
+      remaining: registration.remaining_slots ?? 0,
+    });
+  }
   box.innerHTML = users.length ? users.map(user => `
     <div class="list-item">
       <div>
@@ -1267,20 +1283,37 @@ async function refreshConfig() {
 }
 
 async function refreshSignals() {
-  const text = document.getElementById('signalTextFilter').value.trim();
-  const symbol = document.getElementById('signalSymbolFilter').value;
-  const tf = document.getElementById('signalTfFilter').value;
-  const params = new URLSearchParams({ limit: '120' });
-  if (text) params.set('text', text);
-  if (symbol) params.set('symbol', symbol);
-  if (tf) params.set('tf', tf);
-  state.signals = await fetchJSON(`/api/signals?${params.toString()}`);
+  state.allSignals = await fetchJSON('/api/signals?limit=200');
+  applySignalFilters();
+}
+
+function applySignalFilters() {
+  const text = document.getElementById('signalTextFilter')?.value.trim().toLowerCase() || '';
+  const symbol = document.getElementById('signalSymbolFilter')?.value || '';
+  const tf = document.getElementById('signalTfFilter')?.value || '';
+  state.signals = (state.allSignals || []).filter(item => {
+    if (symbol && item.symbol !== symbol) return false;
+    if (tf && normalizeTf(item.timeframe) !== normalizeTf(tf)) return false;
+    if (!text) return true;
+    const haystack = [
+      item.symbol,
+      item.symbol_name,
+      item.message,
+      item.rule_name,
+      item.source_rule,
+      ...(item.triggers || []).map(trigger => trigger.name),
+    ]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    return haystack.includes(text);
+  });
   if (state.selectedSignalId && !state.signals.some(item => item.id === state.selectedSignalId)) {
     state.selectedSignalId = null;
   }
   renderSignals();
   if (!state.selectedSignalId && state.signals[0]) {
-    await selectSignal(state.signals[0].id);
+    selectSignal(state.signals[0].id);
     return;
   }
   drawChart();
@@ -1312,7 +1345,12 @@ async function refreshAdmin() {
     renderUsers();
     return;
   }
-  state.users = await fetchJSON('/api/users');
+  const [users, registration] = await Promise.all([
+    fetchJSON('/api/users'),
+    fetchJSON('/api/auth/registration'),
+  ]);
+  state.users = users;
+  state.registration = registration;
   renderUsers();
 }
 
@@ -1587,9 +1625,9 @@ function bindEvents() {
   document.getElementById('refreshAllBtn').addEventListener('click', refreshAll);
   document.getElementById('refreshRuntimeBtn').addEventListener('click', refreshRuntime);
   document.getElementById('refreshChartBtn').addEventListener('click', () => refreshChart(false));
-  document.getElementById('signalTextFilter').addEventListener('input', refreshSignals);
-  document.getElementById('signalSymbolFilter').addEventListener('change', refreshSignals);
-  document.getElementById('signalTfFilter').addEventListener('change', refreshSignals);
+  document.getElementById('signalTextFilter').addEventListener('input', applySignalFilters);
+  document.getElementById('signalSymbolFilter').addEventListener('change', applySignalFilters);
+  document.getElementById('signalTfFilter').addEventListener('change', applySignalFilters);
   document.getElementById('chartSymbol').addEventListener('change', () => refreshChart(true));
   document.getElementById('chartTf').addEventListener('change', () => refreshChart(true));
   document.getElementById('chartMode').addEventListener('change', event => {

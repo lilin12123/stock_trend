@@ -61,7 +61,7 @@
           </form>
           <form id="registerForm" class="login-card">
             <h2 data-i18n="register.title">快速注册</h2>
-            <p id="registerMeta" class="meta-text">-</p>
+            <p id="registerMeta" class="meta-text" data-i18n="register.meta">开放注册中，请填写用户名和密码创建普通用户。</p>
             <label>
               <span data-i18n="register.username">用户名</span>
               <input id="registerUsername" name="username" autocomplete="username" />
@@ -240,6 +240,7 @@
               <div class="panel-head">
                 <h3 data-i18n="admin.userList">用户列表</h3>
               </div>
+              <div id="adminRegistrationSummary" class="meta-text"></div>
               <div id="userList" class="list-block"></div>
             </article>
           </div>
